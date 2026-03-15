@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import shlex
 import shutil
@@ -12,17 +13,29 @@ from typing import Callable
 from constants import (
     DEFAULT_COLMAP_DEVICE,
     DEFAULT_COLOR_MODE,
+    DEFAULT_MASK_BACKEND,
     DEFAULT_MASK_CLASSES,
+    DEFAULT_MASK_CONFIDENCE,
     DEFAULT_MASK_IMAGE_SIZE,
     DEFAULT_MASK_MODEL,
+    DEFAULT_RCNN_MODEL,
     PRESET_DEFAULTS,
 )
 from console import print_info, print_success, print_warning
 from models import PipelineConfig
+from pipeline_profiles import (
+    list_pipeline_profiles,
+    load_pipeline_profile,
+    save_pipeline_profile,
+    validate_profile_name,
+)
 
 
 class FriendlyHelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter):
     """Help formatter that keeps examples readable and also shows defaults."""
+
+
+PROFILE_EXCLUDED_FIELDS = {"video", "profile", "show_settings", "help", "command"}
 
 
 def _format_option_strings(action: argparse.Action) -> str:
@@ -43,6 +56,388 @@ def _iter_run_parser_groups(run_parser: argparse.ArgumentParser):
         actions = [action for action in group._group_actions if action.dest != "help"]  # noqa: SLF001
         if actions:
             yield group, actions
+
+
+def _get_subparsers_action(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:  # noqa: SLF001
+    """Return the argparse subparser action stored on the root parser."""
+
+    return next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))  # noqa: SLF001
+
+
+def get_run_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Return the `run` subparser so helper code can inspect its defaults."""
+
+    return _get_subparsers_action(parser).choices["run"]
+
+
+def get_run_parser_defaults(parser: argparse.ArgumentParser) -> dict[str, object]:
+    """Build a default-value map for the `run` command."""
+
+    defaults: dict[str, object] = {}
+    run_parser = get_run_parser(parser)
+    for action in run_parser._actions:  # noqa: SLF001
+        if action.dest == "help" or action.default is argparse.SUPPRESS:
+            continue
+        defaults[action.dest] = copy.deepcopy(action.default)
+    return defaults
+
+
+def build_profile_options_from_args(args: argparse.Namespace) -> dict[str, object]:
+    """Keep only profile-worthy run options when saving a reusable pipeline."""
+
+    return {
+        key: value
+        for key, value in vars(args).items()
+        if key not in PROFILE_EXCLUDED_FIELDS
+    }
+
+
+def apply_profile_to_args(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> argparse.Namespace:
+    """Apply a saved local profile when the user requests one."""
+
+    profile_name = getattr(args, "profile", "")
+    if not profile_name:
+        return args
+
+    profile_options = load_pipeline_profile(profile_name)
+    if profile_options is None:
+        parser.error(f"Saved profile was not found: {profile_name}")
+
+    defaults = get_run_parser_defaults(parser)
+    for field_name, saved_value in profile_options.items():
+        if field_name in PROFILE_EXCLUDED_FIELDS or not hasattr(args, field_name):
+            continue
+        current_value = getattr(args, field_name)
+        if current_value == defaults.get(field_name):
+            setattr(args, field_name, copy.deepcopy(saved_value))
+    return args
+
+
+def print_saved_profiles() -> None:
+    """Show all saved local pipeline profiles."""
+
+    profiles = list_pipeline_profiles()
+    if not profiles:
+        print("No saved pipeline profiles were found on this device.")
+        print("Use 'python preprocess.py setup' to create one.")
+        return
+
+    print("Saved pipeline profiles\n")
+    for name, entry in sorted(profiles.items()):
+        options = entry.get("options", {}) if isinstance(entry, dict) else {}
+        saved_at = entry.get("saved_at", "unknown time") if isinstance(entry, dict) else "unknown time"
+        preset = options.get("preset", "balanced")
+        mask_backend = options.get("mask_backend", DEFAULT_MASK_BACKEND)
+        run_sfm = not options.get("no_colmap", False)
+        print(
+            f"- {name} | preset={preset} | masking={mask_backend} | colmap={'on' if run_sfm else 'off'} | saved={saved_at}"
+        )
+    print("\nUse a saved profile with:")
+    print("  python preprocess.py run input.mp4 --profile PROFILE_NAME")
+
+
+def prompt_choice(question: str, options: list[tuple[str, object]], default_index: int = 0) -> object:
+    """Ask the user to choose one item from a numbered list."""
+
+    print(f"\n{question}")
+    for index, (label, _) in enumerate(options, start=1):
+        default_marker = " [default]" if index - 1 == default_index else ""
+        print(f"  {index}. {label}{default_marker}")
+
+    while True:
+        raw = input(f"Choose 1-{len(options)} [{default_index + 1}]: ").strip()
+        if not raw:
+            return options[default_index][1]
+        if raw.isdigit():
+            selected_index = int(raw) - 1
+            if 0 <= selected_index < len(options):
+                return options[selected_index][1]
+
+        lowered = raw.lower()
+        for label, value in options:
+            if lowered == str(value).lower() or lowered == label.lower():
+                return value
+        print_warning("Please choose one of the listed options.")
+
+
+def prompt_text(question: str, default: str = "") -> str:
+    """Prompt for free-form text while still showing the default value."""
+
+    suffix = f" [{default}]" if default else ""
+    raw = input(f"{question}{suffix}: ").strip()
+    return raw or default
+
+
+def prompt_numeric(question: str, default: float | int, suggestions: list[float | int], cast: type) -> float | int:
+    """Prompt for a numeric setting with common choices and a custom path."""
+
+    options: list[tuple[str, object]] = []
+    all_values: list[float | int] = []
+    for value in [default, *suggestions]:
+        if value not in all_values:
+            all_values.append(value)
+    for value in all_values:
+        options.append((f"Use {value}", value))
+    options.append(("Enter a custom value", "__custom__"))
+
+    default_index = all_values.index(default)
+    selected = prompt_choice(question, options, default_index=default_index)
+    if selected != "__custom__":
+        return cast(selected)
+
+    while True:
+        raw = input("Enter your custom value: ").strip()
+        try:
+            return cast(raw)
+        except ValueError:
+            print_warning("Please enter a valid number.")
+
+
+def prompt_bool(question: str, default: bool) -> bool:
+    """Prompt for a yes or no answer using numbered choices."""
+
+    default_index = 0 if default else 1
+    return bool(
+        prompt_choice(
+            question,
+            [("Yes", True), ("No", False)],
+            default_index=default_index,
+        )
+    )
+
+
+def build_wizard_defaults(parser: argparse.ArgumentParser, preset_name: str) -> dict[str, object]:
+    """Start the setup wizard from CLI defaults plus the chosen preset."""
+
+    values = get_run_parser_defaults(parser)
+    values["preset"] = preset_name
+    values.update(PRESET_DEFAULTS.get(preset_name, {}))
+    return values
+
+
+def run_setup_wizard() -> int:
+    """Walk the user through every major pipeline option and save a named profile."""
+
+    parser = build_argument_parser()
+    print("Pipeline setup wizard\n")
+    print("This wizard will walk through the pipeline step by step and save a reusable local profile.")
+
+    while True:
+        profile_name = prompt_text("Choose a profile name", "my_pipeline")
+        if not validate_profile_name(profile_name):
+            print_warning("Use 2-64 characters with letters, numbers, dashes, or underscores.")
+            continue
+
+        existing_profile = load_pipeline_profile(profile_name)
+        if existing_profile is None:
+            break
+        if prompt_bool(f"A profile named '{profile_name}' already exists. Overwrite it?", default=False):
+            break
+
+    preset_name = str(
+        prompt_choice(
+            "Choose a starting preset",
+            [
+                ("balanced - safe default for most cases", "balanced"),
+                ("laptop-fast - lighter settings for easier runs", "laptop-fast"),
+                ("quality - stronger settings when quality matters more", "quality"),
+            ],
+            default_index=0,
+        )
+    )
+    values = build_wizard_defaults(parser, preset_name)
+
+    values["output"] = prompt_text("Default output folder for this profile", str(values["output"]))
+
+    values["fps"] = prompt_numeric("Frame sampling rate (FPS)", float(values["fps"]), [2.0, 3.0, 4.0, 6.0], float)
+    values["blur_threshold"] = prompt_numeric(
+        "Blur threshold",
+        float(values["blur_threshold"]),
+        [60.0, 90.0, 120.0],
+        float,
+    )
+    values["min_overlap"] = prompt_numeric("Minimum overlap", float(values["min_overlap"]), [0.75, 0.85, 0.9], float)
+    values["max_overlap"] = prompt_numeric("Maximum overlap", float(values["max_overlap"]), [0.95, 0.97, 0.99], float)
+    values["target_overlap"] = prompt_numeric(
+        "Target overlap",
+        float(values["target_overlap"]),
+        [0.85, 0.9, 0.93],
+        float,
+    )
+    values["no_auto_tune"] = not prompt_bool("Enable automatic threshold tuning?", default=not bool(values["no_auto_tune"]))
+    values["sharpness_percentile"] = prompt_numeric(
+        "Sharpness percentile",
+        float(values["sharpness_percentile"]),
+        [45.0, 55.0, 65.0],
+        float,
+    )
+    values["texture_percentile"] = prompt_numeric(
+        "Texture percentile",
+        float(values["texture_percentile"]),
+        [25.0, 35.0, 50.0],
+        float,
+    )
+
+    values["max_image_dim"] = prompt_numeric(
+        "Maximum output image dimension",
+        int(values["max_image_dim"]),
+        [0, 1600, 1920, 2560],
+        int,
+    )
+    values["color_mode"] = prompt_choice(
+        "Choose the output color mode",
+        [("Color images", "color"), ("Grayscale images", "grayscale")],
+        default_index=0 if values["color_mode"] == "color" else 1,
+    )
+    values["deblur_strength"] = prompt_numeric(
+        "Deblur strength",
+        float(values["deblur_strength"]),
+        [0.0, 0.75, 1.0, 1.25],
+        float,
+    )
+    values["disable_white_balance"] = not prompt_bool(
+        "Enable white balance?",
+        default=not bool(values["disable_white_balance"]),
+    )
+    values["disable_clahe"] = not prompt_bool(
+        "Enable CLAHE local equalization?",
+        default=not bool(values["disable_clahe"]),
+    )
+    values["disable_local_contrast"] = not prompt_bool(
+        "Enable local contrast boost?",
+        default=not bool(values["disable_local_contrast"]),
+    )
+
+    values["no_semantic_mask"] = not prompt_bool(
+        "Enable semantic masking?",
+        default=not bool(values["no_semantic_mask"]),
+    )
+    if not values["no_semantic_mask"]:
+        values["mask_backend"] = prompt_choice(
+            "Choose the masking backend",
+            [
+                ("YOLO segmentation", "yolo"),
+                ("Mask R-CNN", "rcnn"),
+            ],
+            default_index=0 if values["mask_backend"] == "yolo" else 1,
+        )
+        default_mask_model = resolve_mask_model(str(values["mask_backend"]), str(values["mask_model"]))
+        values["mask_model"] = prompt_text("Mask model name or path", default_mask_model)
+        mask_classes_default = values["mask_classes"]
+        if isinstance(mask_classes_default, tuple):
+            mask_classes_default = ",".join(str(item) for item in mask_classes_default)
+        values["mask_classes"] = prompt_text("Mask classes (comma-separated or 'all')", str(mask_classes_default))
+        values["mask_device"] = prompt_choice(
+            "Choose the masking device",
+            [
+                ("Auto detect the best device", "auto"),
+                ("CPU", "cpu"),
+                ("Apple MPS", "mps"),
+                ("CUDA GPU", "cuda"),
+                ("Custom device string", "__custom__"),
+            ],
+            default_index=0,
+        )
+        if values["mask_device"] == "__custom__":
+            values["mask_device"] = prompt_text("Enter the custom masking device", "cuda:0")
+        values["mask_image_size"] = prompt_numeric(
+            "Mask inference image size",
+            int(values["mask_image_size"]),
+            [512, 640, 768, 1024],
+            int,
+        )
+        values["mask_confidence"] = prompt_numeric(
+            "Mask confidence threshold",
+            float(values["mask_confidence"]),
+            [0.25, 0.35, 0.5, 0.7],
+            float,
+        )
+
+    values["no_colmap"] = not prompt_bool(
+        "Run COLMAP reconstruction?",
+        default=not bool(values["no_colmap"]),
+    )
+    if not values["no_colmap"]:
+        values["matcher"] = prompt_choice(
+            "Choose the COLMAP matcher",
+            [("Sequential matcher", "sequential"), ("Exhaustive matcher", "exhaustive")],
+            default_index=0 if values["matcher"] == "sequential" else 1,
+        )
+        values["sequential_overlap"] = prompt_numeric(
+            "Sequential matcher overlap",
+            int(values["sequential_overlap"]),
+            [8, 12, 16, 24],
+            int,
+        )
+        values["disable_loop_detection"] = not prompt_bool(
+            "Enable loop detection?",
+            default=not bool(values["disable_loop_detection"]),
+        )
+        if not values["disable_loop_detection"]:
+            values["vocab_tree_path"] = prompt_choice(
+                "Vocabulary tree path",
+                [
+                    ("Do not use a vocabulary tree", ""),
+                    ("Enter a custom path", "__custom__"),
+                ],
+                default_index=0 if not values["vocab_tree_path"] else 1,
+            )
+            if values["vocab_tree_path"] == "__custom__":
+                values["vocab_tree_path"] = prompt_text("Enter the vocabulary tree path", str(values["vocab_tree_path"]))
+        values["colmap_device"] = prompt_choice(
+            "Choose the COLMAP device",
+            [
+                ("Auto detect the best device", "auto"),
+                ("CPU", "cpu"),
+                ("CUDA GPU", "cuda"),
+                ("Custom device string", "__custom__"),
+            ],
+            default_index=0,
+        )
+        if values["colmap_device"] == "__custom__":
+            values["colmap_device"] = prompt_text("Enter the custom COLMAP device", "cuda:0")
+        values["colmap_parallel"] = prompt_choice(
+            "Choose the COLMAP parallel mode",
+            [
+                ("Automatic", None),
+                ("Force parallel on", True),
+                ("Force parallel off", False),
+            ],
+            default_index=0 if values["colmap_parallel"] is None else (1 if values["colmap_parallel"] else 2),
+        )
+        values["colmap_threads"] = prompt_choice(
+            "Choose the COLMAP thread limit",
+            [
+                ("Automatic thread count", 0),
+                ("Use 4 threads", 4),
+                ("Use 8 threads", 8),
+                ("Use 16 threads", 16),
+                ("Enter a custom number", "__custom__"),
+            ],
+            default_index=0 if int(values["colmap_threads"]) == 0 else 4,
+        )
+        if values["colmap_threads"] == "__custom__":
+            values["colmap_threads"] = prompt_numeric("Enter the custom thread limit", 0, [4, 8, 16], int)
+        values["cpu_only"] = False
+
+    print("\nProfile summary")
+    print(f"- name: {profile_name}")
+    print(f"- preset: {values['preset']}")
+    print(f"- output: {values['output']}")
+    print(f"- masking: {'off' if values['no_semantic_mask'] else values['mask_backend']}")
+    print(f"- colmap: {'off' if values['no_colmap'] else values['matcher']}")
+
+    if not prompt_bool("Save this profile locally on this device?", default=True):
+        print_info("Setup wizard canceled before saving.")
+        return 0
+
+    save_pipeline_profile(profile_name, values)
+    print_success(f"Saved pipeline profile '{profile_name}'.")
+    print_info(f"Use it later with: python preprocess.py run input.mp4 --profile {profile_name}")
+    return 0
 
 
 def show_cli_settings() -> None:
@@ -91,6 +486,8 @@ def show_effective_settings(args: argparse.Namespace) -> None:
     config = build_config_from_args(args)
     print("Resolved settings for this run\n")
     print(f"Preset                : {config.preset}")
+    if getattr(args, "profile", ""):
+        print(f"Saved profile         : {args.profile}")
     print(f"Input video           : {config.video_path}")
     print(f"Output folder         : {config.output_root}")
     print(f"Frame extraction FPS  : {config.extraction_fps}")
@@ -106,10 +503,12 @@ def show_effective_settings(args: argparse.Namespace) -> None:
     print(f"CLAHE                 : {config.enable_clahe}")
     print(f"Local contrast        : {config.enable_local_contrast}")
     print(f"Semantic masking      : {config.run_semantic_masking}")
+    print(f"Mask backend          : {config.mask_backend}")
     print(f"Mask model            : {config.mask_model}")
     print(f"Mask classes          : {', '.join(config.mask_classes)}")
     print(f"Mask device           : {config.mask_device}")
     print(f"Mask image size       : {config.mask_image_size}")
+    print(f"Mask confidence       : {config.mask_confidence}")
     print(f"Run COLMAP            : {config.run_sfm}")
     print(f"COLMAP device         : {config.colmap_device}")
     print(f"COLMAP matcher        : {config.matcher}")
@@ -167,6 +566,14 @@ def resolve_colmap_parallel(requested_parallel: bool | None, resolved_device: st
     return resolved_device.startswith("cuda")
 
 
+def resolve_mask_model(mask_backend: str, requested_model: str) -> str:
+    """Pick a backend-appropriate default masking model when the generic default was left unchanged."""
+
+    if mask_backend == "rcnn" and requested_model == DEFAULT_MASK_MODEL:
+        return DEFAULT_RCNN_MODEL
+    return requested_model
+
+
 def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.description = (
         "Run the full preprocessing pipeline from video input to a cleaned image dataset.\n"
@@ -178,6 +585,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "  python preprocess.py run input.mp4 --preset laptop-fast\n"
         "  python preprocess.py run input.mp4 --color-mode grayscale --no-semantic-mask\n"
         "  python preprocess.py run input.mp4 --colmap-device cuda --colmap-parallel\n"
+        "  python preprocess.py run input.mp4 --mask-backend rcnn --mask-model maskrcnn_resnet50_fpn_v2\n"
         "  python preprocess.py run input.mp4 --show-settings\n"
     )
     parser.add_argument("video", help="Path to the input video file.")
@@ -193,6 +601,11 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--output",
         default="processed_dataset",
         help="Output folder. If you give a relative path, it is created in the current folder.",
+    )
+    io_group.add_argument(
+        "--profile",
+        default="",
+        help="Load a saved local pipeline profile created by the setup wizard.",
     )
     io_group.add_argument(
         "--show-settings",
@@ -244,7 +657,20 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "Use instance segmentation to hide moving objects before reconstruction.",
     )
     masking_group.add_argument("--no-semantic-mask", action="store_true", help="Skip semantic masking.")
-    masking_group.add_argument("--mask-model", default=DEFAULT_MASK_MODEL, help="Segmentation model name or path.")
+    masking_group.add_argument(
+        "--mask-backend",
+        choices=["yolo", "rcnn"],
+        default=DEFAULT_MASK_BACKEND,
+        help="Segmentation backend. Use YOLO for Ultralytics models or R-CNN for Torchvision Mask R-CNN.",
+    )
+    masking_group.add_argument(
+        "--mask-model",
+        default=DEFAULT_MASK_MODEL,
+        help=(
+            "Segmentation model name or path. Examples: yolov8n-seg.pt for YOLO, "
+            "maskrcnn_resnet50_fpn or maskrcnn_resnet50_fpn_v2 for R-CNN."
+        ),
+    )
     masking_group.add_argument(
         "--mask-classes",
         default=",".join(DEFAULT_MASK_CLASSES),
@@ -256,6 +682,12 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="Masking device: auto, cpu, mps, cuda, or a specific CUDA device such as cuda:1.",
     )
     masking_group.add_argument("--mask-image-size", type=int, default=DEFAULT_MASK_IMAGE_SIZE, help="Inference image size for masking.")
+    masking_group.add_argument(
+        "--mask-confidence",
+        type=float,
+        default=DEFAULT_MASK_CONFIDENCE,
+        help="Minimum confidence score for a detection to become part of the ignore mask.",
+    )
 
     colmap_group = parser.add_argument_group(
         "COLMAP",
@@ -303,6 +735,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "Turn a video into a cleaner image dataset for 3D reconstruction.\n\n"
             "Main commands:\n"
             "  run       run the full pipeline\n"
+            "  setup     create a saved pipeline step by step\n"
+            "  profiles  list saved local pipeline profiles\n"
             "  settings  list every available setting with defaults\n"
             "  presets   show the built-in presets\n"
             "  doctor    check the local environment\n"
@@ -312,6 +746,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         epilog=(
             "Quick start:\n"
             "  python preprocess.py run input.mp4 --preset laptop-fast\n"
+            "  python preprocess.py setup\n"
+            "  python preprocess.py profiles\n"
             "  python preprocess.py run input.mp4 --output processed_dataset\n"
             "  python preprocess.py settings\n"
             "\nLegacy short form also works:\n"
@@ -329,6 +765,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     _add_run_arguments(run_parser)
 
     subparsers.add_parser("shell", help="Open the interactive framework shell.")
+    subparsers.add_parser("setup", help="Interactive step-by-step pipeline builder that saves a local profile.")
+    subparsers.add_parser("profiles", help="List locally saved pipeline profiles.")
     subparsers.add_parser("settings", help="List every available run setting with defaults.")
     subparsers.add_parser("presets", help="Show the built-in presets.")
     subparsers.add_parser("doctor", help="Check if common dependencies look available.")
@@ -342,7 +780,7 @@ def normalize_argv(argv: list[str] | None = None) -> list[str]:
     if not args:
         return ["shell"]
 
-    known_commands = {"run", "shell", "settings", "presets", "doctor", "-h", "--help"}
+    known_commands = {"run", "shell", "setup", "profiles", "settings", "presets", "doctor", "-h", "--help"}
     if args[0] not in known_commands:
         return ["run", *args]
     return args
@@ -354,6 +792,8 @@ def show_shell_help() -> None:
     print("Interactive shell commands:\n")
     print("- run <video> [options]   : run the full pipeline")
     print("- <video> [options]       : same as run, short form")
+    print("- setup                   : build a pipeline profile step by step")
+    print("- profiles                : list saved local pipeline profiles")
     print("- settings                : list every run setting and its default")
     print("- presets                 : show built-in presets")
     print("- doctor                  : check the environment")
@@ -441,7 +881,14 @@ def run_doctor() -> int:
 
         print_success("Ultralytics is installed.")
     except Exception:
-        print_warning("Ultralytics is missing. Semantic masking will not work.")
+        print_warning("Ultralytics is missing. The YOLO masking backend will not work.")
+
+    try:
+        import torchvision  # noqa: F401
+
+        print_success("Torchvision is installed.")
+    except Exception:
+        print_warning("Torchvision is missing. The R-CNN masking backend will not work.")
 
     if cuda_is_available():
         print_success("CUDA runtime detected. NVIDIA acceleration should be available.")
@@ -472,7 +919,7 @@ def apply_preset(args: argparse.Namespace) -> argparse.Namespace:
 def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Keep argument checks in one place."""
 
-    if args.command in {"shell", "settings", "presets", "doctor"}:
+    if args.command in {"shell", "setup", "profiles", "settings", "presets", "doctor"}:
         return
     if args.fps <= 0:
         parser.error("--fps must be greater than 0")
@@ -490,6 +937,8 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--deblur-strength must be 0 or greater")
     if args.mask_image_size < 32:
         parser.error("--mask-image-size must be at least 32")
+    if not (0.0 <= args.mask_confidence <= 1.0):
+        parser.error("--mask-confidence must be within [0, 1]")
     if args.sequential_overlap < 1:
         parser.error("--sequential-overlap must be at least 1")
     if args.colmap_threads < 0:
@@ -515,6 +964,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     normalized = normalize_argv(argv)
     args = parser.parse_args(normalized)
     if args.command == "run":
+        args = apply_profile_to_args(args, parser)
         args = apply_preset(args)
     validate_args(parser, args)
     return args
@@ -533,6 +983,7 @@ def build_config_from_args(args: argparse.Namespace) -> PipelineConfig:
 
     resolved_colmap_device = resolve_colmap_device(args.colmap_device, cpu_only=args.cpu_only)
     colmap_parallel = resolve_colmap_parallel(args.colmap_parallel, resolved_colmap_device)
+    resolved_mask_model = resolve_mask_model(args.mask_backend, args.mask_model)
 
     return PipelineConfig(
         video_path=os.path.abspath(args.video),
@@ -552,10 +1003,12 @@ def build_config_from_args(args: argparse.Namespace) -> PipelineConfig:
         enable_clahe=not args.disable_clahe,
         enable_local_contrast=not args.disable_local_contrast,
         run_semantic_masking=not args.no_semantic_mask,
-        mask_model=args.mask_model,
+        mask_backend=args.mask_backend,
+        mask_model=resolved_mask_model,
         mask_classes=mask_classes,
         mask_device=args.mask_device,
         mask_image_size=args.mask_image_size,
+        mask_confidence=args.mask_confidence,
         colmap_device=resolved_colmap_device,
         colmap_parallel=colmap_parallel,
         colmap_num_threads=args.colmap_threads,
@@ -572,6 +1025,11 @@ def build_config_from_args(args: argparse.Namespace) -> PipelineConfig:
 def handle_special_command(args: argparse.Namespace) -> int | None:
     """Run helper commands that do not start the pipeline."""
 
+    if args.command == "setup":
+        return run_setup_wizard()
+    if args.command == "profiles":
+        print_saved_profiles()
+        return 0
     if args.command == "settings":
         show_cli_settings()
         return 0

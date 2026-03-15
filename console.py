@@ -52,9 +52,11 @@ def print_run_plan(config: PipelineConfig) -> None:
     )
     print(f"Semantic masking   : {'yes' if config.run_semantic_masking else 'no'}")
     if config.run_semantic_masking:
+        print(f"Mask backend       : {config.mask_backend}")
         print(f"Mask model         : {config.mask_model}")
         print(f"Mask classes       : {', '.join(config.mask_classes)}")
         print(f"Mask device        : {config.mask_device}")
+        print(f"Mask confidence    : {config.mask_confidence:.2f}")
     print(f"Run COLMAP         : {'yes' if config.run_sfm else 'no'}")
     if config.run_sfm:
         print(f"COLMAP matcher     : {config.matcher}")

@@ -28,6 +28,17 @@ class DetectedInstance:
     center_distance: float
 
 
+@dataclass(frozen=True)
+class MaskingRuntime:
+    """Loaded masking backend, resolved device, and label metadata."""
+
+    backend: str
+    device: str
+    model: Any
+    model_name: str
+    class_names: Dict[int, str]
+
+
 class SemanticMaskingStep(PipelineStep):
     """Build ignore masks so dynamic objects do not confuse reconstruction."""
 
@@ -35,41 +46,46 @@ class SemanticMaskingStep(PipelineStep):
     title = "Semantic masking"
     goal = "Detect likely moving objects and create masks so COLMAP can ignore them."
 
+    BACKGROUND_LABELS = {"__background__", "background", "n/a", "none"}
+
     @staticmethod
-    def resolve_mask_device(requested_device: str) -> str:
+    def normalize_device_name(requested_device: str) -> str:
         normalized = requested_device.strip().lower()
         if normalized == "cuda":
-            normalized = "cuda:0"
+            return "cuda:0"
+        return normalized
 
-        if normalized != "auto":
-            try:
-                import torch
-
-                if normalized.startswith("cuda") and not torch.cuda.is_available():
-                    return "cpu"
-                if normalized == "mps" and not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
-                    return "cpu"
-            except Exception:
-                if normalized != "cpu":
-                    return "cpu"
-            return normalized
+    @classmethod
+    def resolve_mask_device(cls, requested_device: str, backend: str) -> str:
+        normalized = cls.normalize_device_name(requested_device)
 
         try:
             import torch
-
-            if torch.cuda.is_available():
-                return "cuda:0"
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return "mps"
         except Exception:
-            pass
+            return "cpu"
+
+        if normalized != "auto":
+            if normalized.startswith("cuda"):
+                return normalized if torch.cuda.is_available() else "cpu"
+            if normalized == "mps":
+                if backend == "rcnn":
+                    return "cpu"
+                has_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+                return "mps" if has_mps else "cpu"
+            return normalized
+
+        if torch.cuda.is_available():
+            return "cuda:0"
+        if backend != "rcnn" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
         return "cpu"
 
-    @staticmethod
-    def build_mask_class_id_map(model_names: Dict[Any, Any], selected_classes: Tuple[str, ...]) -> Dict[int, str]:
+    @classmethod
+    def build_mask_class_id_map(cls, model_names: Dict[Any, Any], selected_classes: Tuple[str, ...]) -> Dict[int, str]:
         normalized_names = {
             int(class_id): str(class_name).strip().lower()
             for class_id, class_name in model_names.items()
+            if str(class_name).strip().lower() not in cls.BACKGROUND_LABELS
         }
         selected_set = {class_name.strip().lower() for class_name in selected_classes}
         if "all" in selected_set or "*" in selected_set:
@@ -80,39 +96,28 @@ class SemanticMaskingStep(PipelineStep):
             if class_name in selected_set
         }
 
-    @staticmethod
-    def extract_instances(
+    @classmethod
+    def extract_instances_from_arrays(
+        cls,
         image_shape: Tuple[int, int],
-        prediction: Any,
+        class_ids: np.ndarray,
+        confidences: np.ndarray,
+        boxes: np.ndarray | None,
+        mask_data: np.ndarray | None,
         selected_class_ids: Dict[int, str],
+        confidence_threshold: float,
     ) -> List[DetectedInstance]:
         height, width = image_shape
-        if prediction.boxes is None:
-            return []
-
-        class_ids = prediction.boxes.cls.detach().cpu().numpy().astype(int)
-        confidences = (
-            prediction.boxes.conf.detach().cpu().numpy()
-            if getattr(prediction.boxes, "conf", None) is not None
-            else np.ones(len(class_ids), dtype=np.float32)
-        )
-        boxes = (
-            prediction.boxes.xyxy.detach().cpu().numpy()
-            if getattr(prediction.boxes, "xyxy", None) is not None
-            else None
-        )
-        mask_data = (
-            prediction.masks.data.detach().cpu().numpy()
-            if prediction.masks is not None and getattr(prediction.masks, "data", None) is not None
-            else None
-        )
-
         image_center = np.array([width / 2.0, height / 2.0], dtype=np.float32)
         max_center_distance = float(np.linalg.norm(image_center)) + 1e-6
         instances: List[DetectedInstance] = []
 
-        for instance_idx, class_id in enumerate(class_ids):
+        for instance_idx, class_id in enumerate(class_ids.astype(int)):
             if class_id not in selected_class_ids:
+                continue
+
+            confidence = float(confidences[instance_idx])
+            if confidence < confidence_threshold:
                 continue
 
             if mask_data is not None:
@@ -149,7 +154,7 @@ class SemanticMaskingStep(PipelineStep):
                     instance_idx=instance_idx,
                     class_id=int(class_id),
                     label=selected_class_ids[class_id],
-                    confidence=float(confidences[instance_idx]),
+                    confidence=confidence,
                     mask=binary_mask,
                     bbox=(float(x1), float(y1), float(x2), float(y2)),
                     area_ratio=area_ratio,
@@ -158,6 +163,75 @@ class SemanticMaskingStep(PipelineStep):
             )
 
         return instances
+
+    @classmethod
+    def extract_yolo_instances(
+        cls,
+        image_shape: Tuple[int, int],
+        prediction: Any,
+        selected_class_ids: Dict[int, str],
+        confidence_threshold: float,
+    ) -> List[DetectedInstance]:
+        if prediction.boxes is None:
+            return []
+
+        class_ids = prediction.boxes.cls.detach().cpu().numpy().astype(int)
+        confidences = (
+            prediction.boxes.conf.detach().cpu().numpy()
+            if getattr(prediction.boxes, "conf", None) is not None
+            else np.ones(len(class_ids), dtype=np.float32)
+        )
+        boxes = (
+            prediction.boxes.xyxy.detach().cpu().numpy()
+            if getattr(prediction.boxes, "xyxy", None) is not None
+            else None
+        )
+        mask_data = (
+            prediction.masks.data.detach().cpu().numpy()
+            if prediction.masks is not None and getattr(prediction.masks, "data", None) is not None
+            else None
+        )
+
+        return cls.extract_instances_from_arrays(
+            image_shape=image_shape,
+            class_ids=class_ids,
+            confidences=confidences,
+            boxes=boxes,
+            mask_data=mask_data,
+            selected_class_ids=selected_class_ids,
+            confidence_threshold=confidence_threshold,
+        )
+
+    @classmethod
+    def extract_rcnn_instances(
+        cls,
+        image_shape: Tuple[int, int],
+        output: Dict[str, Any],
+        selected_class_ids: Dict[int, str],
+        confidence_threshold: float,
+    ) -> List[DetectedInstance]:
+        labels = output.get("labels")
+        if labels is None or len(labels) == 0:
+            return []
+
+        scores = output.get("scores")
+        boxes = output.get("boxes")
+        masks = output.get("masks")
+
+        class_ids = labels.detach().cpu().numpy().astype(int)
+        confidences = scores.detach().cpu().numpy() if scores is not None else np.ones(len(class_ids), dtype=np.float32)
+        boxes_np = boxes.detach().cpu().numpy() if boxes is not None else None
+        mask_data = masks.detach().cpu().numpy()[:, 0, :, :] if masks is not None else None
+
+        return cls.extract_instances_from_arrays(
+            image_shape=image_shape,
+            class_ids=class_ids,
+            confidences=confidences,
+            boxes=boxes_np,
+            mask_data=mask_data,
+            selected_class_ids=selected_class_ids,
+            confidence_threshold=confidence_threshold,
+        )
 
     @staticmethod
     def compute_focus_score(instance: DetectedInstance) -> float:
@@ -285,6 +359,102 @@ class SemanticMaskingStep(PipelineStep):
         next_focus_bbox = focus_instance.bbox if focus_instance is not None else previous_focus_bbox
         return valid_mask, masked_instances, used_labels, next_focus_bbox, focus_instance is not None
 
+    def load_yolo_runtime(self, device: str) -> MaskingRuntime:
+        try:
+            from ultralytics import YOLO
+        except ImportError as error:
+            raise RuntimeError("YOLO masking needs the ultralytics package.") from error
+
+        model = YOLO(self.config.mask_model)
+        class_names = {int(class_id): str(class_name) for class_id, class_name in model.names.items()}
+        return MaskingRuntime(
+            backend="yolo",
+            device=device,
+            model=model,
+            model_name=self.config.mask_model,
+            class_names=class_names,
+        )
+
+    def load_rcnn_runtime(self, device: str) -> MaskingRuntime:
+        try:
+            import torch
+            from torchvision.models.detection import (
+                MaskRCNN_ResNet50_FPN_V2_Weights,
+                MaskRCNN_ResNet50_FPN_Weights,
+                maskrcnn_resnet50_fpn,
+                maskrcnn_resnet50_fpn_v2,
+            )
+        except ImportError as error:
+            raise RuntimeError("R-CNN masking needs the torchvision package.") from error
+
+        model_name = self.config.mask_model.strip().lower()
+        model_registry = {
+            "maskrcnn_resnet50_fpn": (maskrcnn_resnet50_fpn, MaskRCNN_ResNet50_FPN_Weights.DEFAULT),
+            "maskrcnn_resnet50_fpn_v2": (maskrcnn_resnet50_fpn_v2, MaskRCNN_ResNet50_FPN_V2_Weights.DEFAULT),
+        }
+        if model_name not in model_registry:
+            supported = ", ".join(sorted(model_registry.keys()))
+            raise RuntimeError(f"Unsupported R-CNN model '{self.config.mask_model}'. Supported values: {supported}")
+
+        builder, weights = model_registry[model_name]
+        model = builder(weights=weights)
+        model.eval()
+
+        runtime_device = device if device.startswith("cuda") else "cpu"
+        model.to(torch.device(runtime_device))
+
+        categories = weights.meta.get("categories", [])
+        class_names = {int(index): str(label) for index, label in enumerate(categories)}
+        return MaskingRuntime(
+            backend="rcnn",
+            device=runtime_device,
+            model=model,
+            model_name=model_name,
+            class_names=class_names,
+        )
+
+    def load_masking_runtime(self) -> MaskingRuntime:
+        device = self.resolve_mask_device(self.config.mask_device, self.config.mask_backend)
+        if self.config.mask_backend == "rcnn":
+            return self.load_rcnn_runtime(device)
+        return self.load_yolo_runtime(device)
+
+    def predict_instances(self, runtime: MaskingRuntime, image: np.ndarray, selected_class_ids: Dict[int, str]) -> List[DetectedInstance]:
+        if runtime.backend == "yolo":
+            prediction = runtime.model.predict(
+                source=image,
+                imgsz=self.config.mask_image_size,
+                device=runtime.device,
+                conf=self.config.mask_confidence,
+                verbose=False,
+                retina_masks=True,
+            )[0]
+            return self.extract_yolo_instances(
+                image_shape=image.shape[:2],
+                prediction=prediction,
+                selected_class_ids=selected_class_ids,
+                confidence_threshold=self.config.mask_confidence,
+            )
+
+        try:
+            import torch
+        except ImportError as error:
+            raise RuntimeError("R-CNN masking needs PyTorch.") from error
+
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        tensor = torch.from_numpy(image_rgb).permute(2, 0, 1).float() / 255.0
+        tensor = tensor.to(runtime.device)
+
+        with torch.inference_mode():
+            output = runtime.model([tensor])[0]
+
+        return self.extract_rcnn_instances(
+            image_shape=image.shape[:2],
+            output=output,
+            selected_class_ids=selected_class_ids,
+            confidence_threshold=self.config.mask_confidence,
+        )
+
     def run(self, context: PipelineContext) -> PipelineContext:
         if not self.config.run_semantic_masking:
             return context
@@ -292,50 +462,47 @@ class SemanticMaskingStep(PipelineStep):
             raise RuntimeError("Output folders were not prepared before semantic masking.")
 
         self.announce()
-        try:
-            from ultralytics import YOLO
-        except ImportError as error:
-            raise RuntimeError("Semantic masking needs the ultralytics package.") from error
-
         os.makedirs(context.paths.masks, exist_ok=True)
-        device = self.resolve_mask_device(self.config.mask_device)
-        model = YOLO(self.config.mask_model)
-        class_id_map = self.build_mask_class_id_map(model.names, self.config.mask_classes)
 
+        runtime = self.load_masking_runtime()
+        requested_device = self.normalize_device_name(self.config.mask_device)
+        if requested_device not in {"auto", runtime.device}:
+            print_warning(
+                f"Mask backend '{runtime.backend}' could not use '{self.config.mask_device}', so it will run on '{runtime.device}'."
+            )
+
+        class_id_map = self.build_mask_class_id_map(runtime.class_names, self.config.mask_classes)
         if not class_id_map:
             raise RuntimeError(
-                "None of the requested mask classes were found in the segmentation model. Please check --mask-classes."
+                "None of the requested mask classes were found in the selected segmentation model. Please check --mask-classes."
             )
 
         print_info(
-            f"Mask model: {self.config.mask_model} | device: {device} | classes: {', '.join(class_id_map.values())}"
+            f"Mask backend: {runtime.backend} | model: {runtime.model_name} | device: {runtime.device} | "
+            f"confidence: {self.config.mask_confidence:.2f} | classes: {', '.join(class_id_map.values())}"
         )
 
         predictions_by_image: List[Tuple[str, Tuple[int, int], List[DetectedInstance]]] = []
-
         for image_path in context.saved_images:
             image = cv2.imread(image_path)
             if image is None:
                 print_warning(f"Could not read image for masking: {image_path}")
                 continue
 
-            prediction = model.predict(
-                source=image,
-                imgsz=self.config.mask_image_size,
-                device=device,
-                verbose=False,
-                retina_masks=True,
-            )[0]
-            instances = self.extract_instances(
-                image_shape=image.shape[:2],
-                prediction=prediction,
-                selected_class_ids=class_id_map,
-            )
+            instances = self.predict_instances(runtime, image, class_id_map)
             predictions_by_image.append((image_path, image.shape[:2], instances))
 
-        focus_class_id, focus_label = self.choose_focus_class(
-            [instances for _, _, instances in predictions_by_image]
-        )
+        if not predictions_by_image:
+            print_warning("No images were available for semantic masking.")
+            context.semantic_masking_result = {
+                "summary": "Semantic masking skipped because no readable images were found.",
+                "backend": runtime.backend,
+                "model": runtime.model_name,
+                "device": runtime.device,
+            }
+            return context
+
+        focus_class_id, focus_label = self.choose_focus_class([instances for _, _, instances in predictions_by_image])
         if focus_label is not None:
             print_info(f"Focused subject class kept unmasked: {focus_label}")
         else:
@@ -376,9 +543,11 @@ class SemanticMaskingStep(PipelineStep):
 
         context.semantic_masking_result = {
             "summary": "Semantic masking completed.",
-            "model": self.config.mask_model,
-            "device": device,
+            "backend": runtime.backend,
+            "model": runtime.model_name,
+            "device": runtime.device,
             "mask_classes": list(class_id_map.values()),
+            "mask_confidence": self.config.mask_confidence,
             "focus_class": focus_label,
             "masks_written": masks_written,
             "images_with_masked_objects": images_with_masked_objects,

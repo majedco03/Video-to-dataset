@@ -2,7 +2,7 @@
 
 This project turns a video into a cleaner image set for 3D reconstruction.
 
-Recent updates add more direct control over the pipeline, including grayscale export, CUDA-aware defaults, and optional parallel COLMAP execution.
+Recent updates add more direct control over the pipeline, including grayscale export, CUDA-aware defaults, optional parallel COLMAP execution, and support for both YOLO and Mask R-CNN based masking.
 
 ## What this project does
 
@@ -12,7 +12,7 @@ Starting from a video file, the pipeline:
 2. removes frames that are blurry or weak,
 3. keeps a better-spaced sequence of views,
 4. cleans and normalizes the exported images,
-5. optionally masks dynamic objects with YOLO segmentation,
+5. optionally masks dynamic objects with YOLO or Mask R-CNN segmentation,
 6. optionally runs COLMAP for sparse reconstruction,
 7. writes a final report with the run settings and results.
 
@@ -35,7 +35,7 @@ Optional but recommended:
 
 - a Python virtual environment
 - NVIDIA CUDA drivers if you want GPU acceleration on Windows or Linux
-- the Ultralytics YOLO model file if you want local offline masking
+- a local YOLO checkpoint such as `yolov8n-seg.pt` if you want offline YOLO masking
 
 ### 2. Clone the repository
 
@@ -66,7 +66,7 @@ python -m pip install --upgrade pip
 
 ### 4. Install Python dependencies
 
-This project uses OpenCV, NumPy, Ultralytics, and PyTorch-backed inference for segmentation.
+This project uses OpenCV, NumPy, Ultralytics, Torchvision, and PyTorch-backed inference for segmentation.
 
 For a simple CPU setup:
 
@@ -85,8 +85,9 @@ pip install numpy opencv-python ultralytics
 
 Notes:
 
-- On Apple Silicon, PyTorch can use `mps` instead of CUDA.
-- If semantic masking is disabled, the pipeline can still run without Ultralytics.
+- On Apple Silicon, PyTorch can use `mps` for the YOLO backend.
+- The Mask R-CNN backend is most reliable on CPU or CUDA.
+- If semantic masking is disabled, the pipeline can still run without Ultralytics and Torchvision.
 
 ### 5. Install COLMAP
 
@@ -114,13 +115,18 @@ colmap -h
 
 ### 6. Optional: model file setup
 
-The default masking model is `yolov8n-seg.pt`.
+The default YOLO masking model is `yolov8n-seg.pt`.
+
+The pipeline supports two masking backends:
+
+- `yolo` for Ultralytics YOLO segmentation models
+- `rcnn` for Torchvision Mask R-CNN models such as `maskrcnn_resnet50_fpn_v2`
 
 You can use either approach:
 
 - keep the model file locally in the project folder, or
 - point the CLI to another checkpoint with `--mask-model`, or
-- let Ultralytics resolve/download the checkpoint when supported by the runtime.
+- let Ultralytics resolve or download the checkpoint when supported by the runtime.
 
 If you do not want segmentation at all, use `--no-semantic-mask`.
 
@@ -132,7 +138,7 @@ Run:
 python preprocess.py doctor
 ```
 
-This checks whether Python, OpenCV, Ultralytics, COLMAP, and CUDA detection look correct.
+This checks whether Python, OpenCV, Ultralytics, Torchvision, COLMAP, and CUDA detection look correct.
 
 ### 8. Inspect available settings
 
@@ -142,10 +148,28 @@ Before your first run, view the available options:
 python preprocess.py settings
 ```
 
+To build a reusable pipeline step by step and save it locally on your device:
+
+```bash
+python preprocess.py setup
+```
+
+To list your saved local profiles later:
+
+```bash
+python preprocess.py profiles
+```
+
 To preview the exact resolved configuration for a specific command:
 
 ```bash
 python preprocess.py run input.mp4 --show-settings
+```
+
+To run with a saved local profile:
+
+```bash
+python preprocess.py run input.mp4 --profile my_pipeline
 ```
 
 ### 9. Run the pipeline
@@ -186,6 +210,12 @@ python preprocess.py run input.mp4 --no-colmap
 python preprocess.py run input.mp4 --mask-device cuda --colmap-device cuda
 ```
 
+#### Use Mask R-CNN instead of YOLO
+
+```bash
+python preprocess.py run input.mp4 --mask-backend rcnn --mask-model maskrcnn_resnet50_fpn_v2
+```
+
 #### Force CPU only
 
 ```bash
@@ -203,7 +233,6 @@ After a successful run, the output folder usually contains:
 
 ---
 
-
 ## Main file to run
 
 Use:
@@ -219,6 +248,14 @@ Show help:
 Show every available pipeline setting and its default:
 
 - `python preprocess.py settings`
+
+Create a saved pipeline step by step:
+
+- `python preprocess.py setup`
+
+List saved local profiles:
+
+- `python preprocess.py profiles`
 
 Open the interactive shell:
 
@@ -240,6 +277,10 @@ Run with CUDA-enabled masking and parallel COLMAP:
 
 - `python preprocess.py run input.mp4 --mask-device cuda --colmap-device cuda --colmap-parallel`
 
+Run with Mask R-CNN masking:
+
+- `python preprocess.py run input.mp4 --mask-backend rcnn --mask-model maskrcnn_resnet50_fpn_v2`
+
 Preview the resolved config without starting the pipeline:
 
 - `python preprocess.py run input.mp4 --show-settings`
@@ -251,6 +292,12 @@ Runs the full pipeline.
 
 ### `shell`
 Opens an interactive loop so you can run many commands without starting Python again.
+
+### `setup`
+Starts an interactive step-by-step builder. It asks about the pipeline features one by one, shows choices each time, and saves the final pipeline locally as a reusable profile.
+
+### `profiles`
+Lists the locally saved pipeline profiles available on the current device.
 
 ### `presets`
 Shows the built-in presets.
@@ -265,10 +312,11 @@ Checks if common dependencies are available.
 
 1. Activate your virtual environment.
 2. Run `python preprocess.py doctor`.
-3. Run `python preprocess.py settings`.
-4. Preview your exact command with `python preprocess.py run input.mp4 --show-settings`.
-5. Start with `--preset laptop-fast`.
-6. Turn on stronger options only after the base run succeeds.
+3. Run `python preprocess.py setup` if you want a guided profile builder.
+4. Run `python preprocess.py settings`.
+5. Preview your exact command with `python preprocess.py run input.mp4 --show-settings`.
+6. Start with `--preset laptop-fast` or with a saved profile.
+7. Turn on stronger options only after the base run succeeds.
 
 ## Presets
 
@@ -283,7 +331,10 @@ Checks if common dependencies are available.
 - `--disable-white-balance` - keep original color balance
 - `--disable-clahe` - skip local luminance equalization
 - `--disable-local-contrast` - skip the final local contrast pass
+- `--mask-backend yolo|rcnn` - choose the segmentation engine
 - `--mask-device auto|cpu|mps|cuda[:index]` - pick the segmentation runtime device
+- `--mask-confidence <float>` - ignore weak detections below the chosen confidence
+- `--profile NAME` - load a saved local pipeline profile created by the setup wizard
 - `--colmap-device auto|cpu|cuda[:index]` - choose how COLMAP runs
 - `--colmap-parallel` / `--no-colmap-parallel` - control threaded COLMAP execution
 - `--colmap-threads <int>` - cap COLMAP CPU thread usage
@@ -330,6 +381,16 @@ Check these points:
 
 Either place `yolov8n-seg.pt` in the project folder, choose another checkpoint with `--mask-model`, or disable semantic masking.
 
+### I want to use Mask R-CNN instead of YOLO
+
+Use:
+
+```bash
+python preprocess.py run input.mp4 --mask-backend rcnn --mask-model maskrcnn_resnet50_fpn_v2
+```
+
+Make sure `torchvision` is installed.
+
 ### I only want the cleaned images
 
 Use:
@@ -344,4 +405,18 @@ Use:
 
 ```bash
 python preprocess.py run input.mp4 --preset laptop-fast
+```
+
+### I want to reuse the same pipeline later
+
+Use the step-by-step wizard once:
+
+```bash
+python preprocess.py setup
+```
+
+Then run future videos with:
+
+```bash
+python preprocess.py run input.mp4 --profile my_pipeline
 ```

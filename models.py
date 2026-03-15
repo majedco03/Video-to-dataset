@@ -59,10 +59,12 @@ class PipelineConfig:
     enable_clahe: bool
     enable_local_contrast: bool
     run_semantic_masking: bool
+    mask_backend: str
     mask_model: str
     mask_classes: Tuple[str, ...]
     mask_device: str
     mask_image_size: int
+    mask_confidence: float
     colmap_device: str
     colmap_parallel: bool
     colmap_num_threads: int
