@@ -1,4 +1,4 @@
-# Video to 3D Dataset
+# Video to Dataset
 
 Turn raw video into a clean, reconstruction-ready image dataset with optional semantic masking and COLMAP SfM.
 
