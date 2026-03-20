@@ -57,6 +57,10 @@ def print_run_plan(config: PipelineConfig) -> None:
         print(f"Mask classes       : {', '.join(config.mask_classes)}")
         print(f"Mask device        : {config.mask_device}")
         print(f"Mask confidence    : {config.mask_confidence:.2f}")
+        print(f"Strict static mask : {'on' if config.strict_static_masking else 'off'}")
+    max_images = config.output_max_images if config.output_max_images > 0 else 'unbounded'
+    print(f"Angle validation   : {'on' if config.validate_angle_coverage else 'off'} ({config.angle_bins} bins)")
+    print(f"Output image range : {config.output_min_images} to {max_images}")
     print(f"Run COLMAP         : {'yes' if config.run_sfm else 'no'}")
     if config.run_sfm:
         print(f"COLMAP matcher     : {config.matcher}")
@@ -66,6 +70,9 @@ def print_run_plan(config: PipelineConfig) -> None:
         print(
             f"COLMAP threads     : {config.colmap_num_threads if config.colmap_num_threads > 0 else 'auto'}"
         )
+    if config.quality_gate_min_overlap > 0:
+        print(f"Quality gate       : mean overlap >= {config.quality_gate_min_overlap:.2f}")
+        print(f"Gate failure mode  : {'fail run' if config.quality_gate_fail else 'warn only'}")
     print("-" * 72)
 
 

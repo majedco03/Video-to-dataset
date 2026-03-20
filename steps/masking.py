@@ -341,12 +341,13 @@ class SemanticMaskingStep(PipelineStep):
         instances: List[DetectedInstance],
         focus_class_id: int | None,
         previous_focus_bbox: Tuple[float, float, float, float] | None,
+        keep_focus_subject: bool,
     ) -> Tuple[np.ndarray, int, List[str], Tuple[float, float, float, float] | None, bool]:
         height, width = image_shape
         valid_mask = np.full((height, width), 255, dtype=np.uint8)
         masked_instances = 0
         used_labels: List[str] = []
-        focus_instance = cls.choose_focus_instance(instances, focus_class_id, previous_focus_bbox)
+        focus_instance = cls.choose_focus_instance(instances, focus_class_id, previous_focus_bbox) if keep_focus_subject else None
 
         for instance in instances:
             if focus_instance is not None and instance.instance_idx == focus_instance.instance_idx:
@@ -503,8 +504,10 @@ class SemanticMaskingStep(PipelineStep):
             return context
 
         focus_class_id, focus_label = self.choose_focus_class([instances for _, _, instances in predictions_by_image])
-        if focus_label is not None:
+        if focus_label is not None and not self.config.strict_static_masking:
             print_info(f"Focused subject class kept unmasked: {focus_label}")
+        elif focus_label is not None:
+            print_info("Strict static masking is enabled, so all selected dynamic classes will be masked.")
         else:
             print_warning("No focused subject class was detected. All detected objects in the selected classes will be masked.")
 
@@ -521,6 +524,7 @@ class SemanticMaskingStep(PipelineStep):
                 instances=instances,
                 focus_class_id=focus_class_id,
                 previous_focus_bbox=previous_focus_bbox,
+                keep_focus_subject=not self.config.strict_static_masking,
             )
 
             mask_path = os.path.join(context.paths.masks, os.path.basename(image_path))
@@ -548,6 +552,7 @@ class SemanticMaskingStep(PipelineStep):
             "device": runtime.device,
             "mask_classes": list(class_id_map.values()),
             "mask_confidence": self.config.mask_confidence,
+            "strict_static_masking": self.config.strict_static_masking,
             "focus_class": focus_label,
             "masks_written": masks_written,
             "images_with_masked_objects": images_with_masked_objects,

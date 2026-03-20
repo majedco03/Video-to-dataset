@@ -1,0 +1,90 @@
+{
+  "timestamp": "2026-03-15T18:21:05.441096Z",
+  "video_path": "/Users/majidm/Downloads/IMG_9612.MOV",
+  "output_root": "/Users/majidm/Desktop/3D Preprocessing/processed_dataset",
+  "parameters": {
+    "extraction_fps": 2.0,
+    "blur_threshold": 90.0,
+    "min_overlap": 0.75,
+    "max_overlap": 0.9,
+    "target_overlap": 0.8,
+    "auto_tune": true,
+    "sharpness_percentile": 50.0,
+    "texture_percentile": 10.0,
+    "max_image_dim": 2560,
+    "color_mode": "color",
+    "deblur_strength": 0.0,
+    "enable_white_balance": false,
+    "enable_clahe": false,
+    "enable_local_contrast": false,
+    "run_semantic_masking": true,
+    "mask_backend": "yolo",
+    "mask_model": "yolov8n-seg.pt",
+    "mask_classes": [
+      "person",
+      "dog",
+      "sky",
+      "cat",
+      "truck",
+      "bus"
+    ],
+    "mask_device": "mps",
+    "mask_image_size": 1024,
+    "mask_confidence": 0.5,
+    "colmap_device": "cpu",
+    "colmap_parallel": false,
+    "colmap_num_threads": 0,
+    "matcher": "sequential",
+    "sequential_overlap": 12,
+    "loop_detection": true,
+    "vocab_tree_path": "",
+    "use_gpu": false,
+    "run_sfm": false,
+    "preset": "quality"
+  },
+  "candidate_stats": {
+    "sharpness_threshold": 227.21499633789062,
+    "texture_threshold": 23.03350257873535,
+    "sampled_count": 334.0,
+    "kept_count": 167.0,
+    "sharpness_p50": 227.21499633789062,
+    "sharpness_p75": 327.4952392578125,
+    "exposure_score_p50": 0.933536171913147
+  },
+  "selection_stats": {
+    "selected_frames": 54,
+    "overlap_violations": 53,
+    "mean_overlap": 0.6565200775755459,
+    "min_overlap_observed": 0.02014911863538954,
+    "max_overlap_observed": 0.9933279758029514
+  },
+  "output_images": 54,
+  "semantic_masking": {
+    "summary": "Semantic masking completed.",
+    "backend": "yolo",
+    "model": "yolov8n-seg.pt",
+    "device": "mps",
+    "mask_classes": [
+      "person",
+      "bus",
+      "truck",
+      "cat",
+      "dog"
+    ],
+    "mask_confidence": 0.5,
+    "focus_class": "truck",
+    "masks_written": 54,
+    "images_with_masked_objects": 8,
+    "images_with_focus_subject": 10,
+    "masked_instances": 10,
+    "class_usage": {
+      "truck": 3,
+      "bus": 6,
+      "person": 1
+    },
+    "mask_dir": "/Users/majidm/Desktop/3D Preprocessing/processed_dataset/masks"
+  },
+  "colmap": {
+    "summary": "COLMAP not executed."
+  }
+}

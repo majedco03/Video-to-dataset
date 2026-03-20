@@ -11,6 +11,7 @@ import sys
 from typing import Callable
 
 from constants import (
+    DEFAULT_ANGLE_BINS,
     DEFAULT_COLMAP_DEVICE,
     DEFAULT_COLOR_MODE,
     DEFAULT_MASK_BACKEND,
@@ -18,7 +19,13 @@ from constants import (
     DEFAULT_MASK_CONFIDENCE,
     DEFAULT_MASK_IMAGE_SIZE,
     DEFAULT_MASK_MODEL,
+    DEFAULT_OUTPUT_MAX_IMAGES,
+    DEFAULT_OUTPUT_MIN_IMAGES,
+    DEFAULT_QUALITY_GATE_FAIL,
+    DEFAULT_QUALITY_GATE_MIN_OVERLAP,
     DEFAULT_RCNN_MODEL,
+    DEFAULT_STRICT_STATIC_MASKING,
+    DEFAULT_VALIDATE_ANGLE_COVERAGE,
     PRESET_DEFAULTS,
 )
 from console import print_info, print_success, print_warning
@@ -509,6 +516,11 @@ def show_effective_settings(args: argparse.Namespace) -> None:
     print(f"Mask device           : {config.mask_device}")
     print(f"Mask image size       : {config.mask_image_size}")
     print(f"Mask confidence       : {config.mask_confidence}")
+    print(f"Strict static masking : {config.strict_static_masking}")
+    print(f"Validate angle cover  : {config.validate_angle_coverage}")
+    print(f"Angle bins            : {config.angle_bins}")
+    max_images = config.output_max_images if config.output_max_images > 0 else "unbounded"
+    print(f"Output image range    : {config.output_min_images} -> {max_images}")
     print(f"Run COLMAP            : {config.run_sfm}")
     print(f"COLMAP device         : {config.colmap_device}")
     print(f"COLMAP matcher        : {config.matcher}")
@@ -518,6 +530,8 @@ def show_effective_settings(args: argparse.Namespace) -> None:
     print(f"Parallel COLMAP       : {config.colmap_parallel}")
     print(f"COLMAP threads        : {config.colmap_num_threads if config.colmap_num_threads > 0 else 'auto'}")
     print(f"Use GPU in COLMAP     : {config.use_gpu}")
+    print(f"Quality gate overlap  : {config.quality_gate_min_overlap}")
+    print(f"Quality gate fail     : {config.quality_gate_fail}")
 
 
 def cuda_is_available() -> bool:
@@ -574,6 +588,27 @@ def resolve_mask_model(mask_backend: str, requested_model: str) -> str:
     return requested_model
 
 
+def parse_output_image_range(value: str) -> tuple[int, int]:
+    """Parse the output image range string in the form min:max."""
+
+    text = (value or "").strip()
+    if not text:
+        return DEFAULT_OUTPUT_MIN_IMAGES, DEFAULT_OUTPUT_MAX_IMAGES
+
+    if ":" not in text:
+        number = int(text)
+        if number < 0:
+            raise ValueError("output image range cannot be negative")
+        return number, number
+
+    min_text, max_text = text.split(":", maxsplit=1)
+    min_value = int(min_text.strip() or "0")
+    max_value = int(max_text.strip() or "0")
+    if min_value < 0 or max_value < 0:
+        raise ValueError("output image range cannot be negative")
+    return min_value, max_value
+
+
 def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.description = (
         "Run the full preprocessing pipeline from video input to a cleaned image dataset.\n"
@@ -625,6 +660,30 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     frame_group.add_argument("--no-auto-tune", action="store_true", help="Use fixed thresholds only.")
     frame_group.add_argument("--sharpness-percentile", type=float, default=55.0, help="Adaptive sharpness percentile.")
     frame_group.add_argument("--texture-percentile", type=float, default=35.0, help="Adaptive texture percentile.")
+    frame_group.add_argument(
+        "--validate-angle-coverage",
+        dest="validate_angle_coverage",
+        action="store_true",
+        default=DEFAULT_VALIDATE_ANGLE_COVERAGE,
+        help="Check selected frame coverage across angle bins and backfill missing bins.",
+    )
+    frame_group.add_argument(
+        "--no-validate-angle-coverage",
+        dest="validate_angle_coverage",
+        action="store_false",
+        help="Skip angle-coverage validation and backfilling.",
+    )
+    frame_group.add_argument(
+        "--angle-bins",
+        type=int,
+        default=DEFAULT_ANGLE_BINS,
+        help="How many angle bins to use while checking frame coverage.",
+    )
+    frame_group.add_argument(
+        "--output-image-range",
+        default=f"{DEFAULT_OUTPUT_MIN_IMAGES}:{DEFAULT_OUTPUT_MAX_IMAGES}",
+        help="Desired output image range as min:max. Use 0 for an open upper bound, for example 80:0.",
+    )
 
     image_group = parser.add_argument_group(
         "Image clean-up",
@@ -688,6 +747,12 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_MASK_CONFIDENCE,
         help="Minimum confidence score for a detection to become part of the ignore mask.",
     )
+    masking_group.add_argument(
+        "--strict-static-masking",
+        action="store_true",
+        default=DEFAULT_STRICT_STATIC_MASKING,
+        help="Mask all detected selected classes without keeping a focused subject instance.",
+    )
 
     colmap_group = parser.add_argument_group(
         "COLMAP",
@@ -724,6 +789,23 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
     colmap_group.add_argument("--cpu-only", action="store_true", help="Use CPU only for COLMAP feature extraction and matching.")
     colmap_group.add_argument("--no-colmap", action="store_true", help="Skip COLMAP and only export the cleaned image dataset.")
+
+    quality_group = parser.add_argument_group(
+        "Quality gates",
+        "Optional checks for minimum reconstruction readiness before finishing the run.",
+    )
+    quality_group.add_argument(
+        "--quality-gate-min-overlap",
+        type=float,
+        default=DEFAULT_QUALITY_GATE_MIN_OVERLAP,
+        help="Require at least this mean overlap in selected output frames. Use 0 to disable.",
+    )
+    quality_group.add_argument(
+        "--quality-gate-fail",
+        action="store_true",
+        default=DEFAULT_QUALITY_GATE_FAIL,
+        help="Fail the run when a quality gate check does not pass instead of only warning.",
+    )
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -939,10 +1021,26 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--mask-image-size must be at least 32")
     if not (0.0 <= args.mask_confidence <= 1.0):
         parser.error("--mask-confidence must be within [0, 1]")
+    if args.angle_bins < 3:
+        parser.error("--angle-bins must be at least 3")
     if args.sequential_overlap < 1:
         parser.error("--sequential-overlap must be at least 1")
     if args.colmap_threads < 0:
         parser.error("--colmap-threads must be 0 or greater")
+    if not (0.0 <= args.quality_gate_min_overlap <= 1.0):
+        parser.error("--quality-gate-min-overlap must be within [0, 1]")
+
+    try:
+        output_min_images, output_max_images = parse_output_image_range(args.output_image_range)
+    except ValueError as error:
+        parser.error(f"--output-image-range is invalid: {error}")
+
+    if output_max_images > 0 and output_min_images > output_max_images:
+        parser.error("--output-image-range must use min <= max when max is not zero")
+
+    args.output_min_images = output_min_images
+    args.output_max_images = output_max_images
+
     if not os.path.isfile(args.video):
         parser.error(f"Input video was not found: {args.video}")
     valid_mask_devices = {"auto", "cpu", "mps", "cuda"}
@@ -1003,6 +1101,7 @@ def build_config_from_args(args: argparse.Namespace) -> PipelineConfig:
         enable_clahe=not args.disable_clahe,
         enable_local_contrast=not args.disable_local_contrast,
         run_semantic_masking=not args.no_semantic_mask,
+        strict_static_masking=args.strict_static_masking,
         mask_backend=args.mask_backend,
         mask_model=resolved_mask_model,
         mask_classes=mask_classes,
@@ -1018,6 +1117,12 @@ def build_config_from_args(args: argparse.Namespace) -> PipelineConfig:
         vocab_tree_path=args.vocab_tree_path,
         use_gpu=resolved_colmap_device.startswith("cuda"),
         run_sfm=not args.no_colmap,
+        angle_bins=args.angle_bins,
+        validate_angle_coverage=args.validate_angle_coverage,
+        output_min_images=args.output_min_images,
+        output_max_images=args.output_max_images,
+        quality_gate_min_overlap=args.quality_gate_min_overlap,
+        quality_gate_fail=args.quality_gate_fail,
         preset=args.preset,
     )
 

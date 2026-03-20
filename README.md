@@ -14,6 +14,9 @@ Turn raw video into a clean, reconstruction-ready image dataset with optional se
 - Optional semantic masking to ignore dynamic objects
   - YOLO backend (Ultralytics)
   - Mask R-CNN backend (Torchvision)
+- Strict static-scene masking mode (mask all selected dynamic classes)
+- Angle-coverage validation with automatic backfill from remaining candidates
+- Output image range control with adaptive refill from least-covered angles
 - Optional COLMAP sparse reconstruction + undistorted export
 - CUDA-aware defaults for NVIDIA users
 - Interactive setup wizard to create reusable local pipeline profiles
@@ -73,7 +76,13 @@ python -m pip install --upgrade pip
 
 ### 3) Python packages
 
-CPU setup:
+Install from requirements file:
+
+```bash
+pip install -r requirements.txt
+```
+
+If you prefer manual install, CPU setup:
 
 ```bash
 pip install numpy opencv-python ultralytics torch torchvision
@@ -118,6 +127,71 @@ python preprocess.py doctor
 - `doctor` — check dependency availability
 - `shell` — interactive command shell
 
+## Tutorial: end-to-end usage
+
+### 1) Validate your environment
+
+```bash
+python preprocess.py doctor
+```
+
+### 2) Start with a safe baseline run
+
+```bash
+python preprocess.py run input.mp4 --preset laptop-fast --show-settings
+python preprocess.py run input.mp4 --preset laptop-fast
+```
+
+### 3) Run a reconstruction-focused static-scene pipeline
+
+```bash
+python preprocess.py run input.mp4 \
+  --preset quality \
+  --strict-static-masking \
+  --validate-angle-coverage \
+  --angle-bins 16 \
+  --output-image-range 120:220 \
+  --quality-gate-min-overlap 0.80 \
+  --quality-gate-fail
+```
+
+This configuration does the following:
+
+- masks selected dynamic classes aggressively
+- checks view-angle coverage and backfills missing bins from remaining candidates
+- enforces a target output image count range
+- fails early if overlap quality is below the threshold
+
+### 4) Generate COLMAP outputs for NeRFStudio/3DGS preparation
+
+```bash
+python preprocess.py run input.mp4 \
+  --preset quality \
+  --strict-static-masking \
+  --validate-angle-coverage \
+  --angle-bins 16 \
+  --output-image-range 120:220
+```
+
+By default COLMAP runs unless you use `--no-colmap`.
+
+### 5) Verify the run report
+
+Check these fields in `processed_dataset/preprocessing_report.json`:
+
+- `output_images`
+- `selection_stats.mean_overlap`
+- `selection_coverage`
+- `quality_gates`
+- `colmap.summary`
+
+### 6) Save and reuse your preferred setup
+
+```bash
+python preprocess.py setup
+python preprocess.py run input.mp4 --profile my_pipeline
+```
+
 ### Helpful examples
 
 Basic run:
@@ -138,6 +212,24 @@ Use Mask R-CNN masking:
 python preprocess.py run input.mp4 --mask-backend rcnn --mask-model maskrcnn_resnet50_fpn_v2
 ```
 
+Enable strict static-scene masking (mask all detected selected classes):
+
+```bash
+python preprocess.py run input.mp4 --strict-static-masking
+```
+
+Enforce angle coverage and a target output range (min:max):
+
+```bash
+python preprocess.py run input.mp4 --validate-angle-coverage --angle-bins 16 --output-image-range 120:180
+```
+
+Require reconstruction-readiness overlap quality gate:
+
+```bash
+python preprocess.py run input.mp4 --quality-gate-min-overlap 0.80 --quality-gate-fail
+```
+
 Skip masking and COLMAP:
 
 ```bash
@@ -148,6 +240,12 @@ Preview resolved config before running:
 
 ```bash
 python preprocess.py run input.mp4 --show-settings
+```
+
+Run tests:
+
+```bash
+python -m pytest -q
 ```
 
 ## Interactive setup wizard and profiles

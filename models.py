@@ -59,6 +59,7 @@ class PipelineConfig:
     enable_clahe: bool
     enable_local_contrast: bool
     run_semantic_masking: bool
+    strict_static_masking: bool
     mask_backend: str
     mask_model: str
     mask_classes: Tuple[str, ...]
@@ -74,6 +75,12 @@ class PipelineConfig:
     vocab_tree_path: str
     use_gpu: bool
     run_sfm: bool
+    angle_bins: int
+    validate_angle_coverage: bool
+    output_min_images: int
+    output_max_images: int
+    quality_gate_min_overlap: float
+    quality_gate_fail: bool
     preset: str = "balanced"
 
 
@@ -89,6 +96,7 @@ class PipelineContext:
     selected_frames: List[CandidateFrame] = field(default_factory=list)
     overlap_violations: int = 0
     overlaps: List[float] = field(default_factory=list)
+    selection_coverage: Dict[str, Any] = field(default_factory=dict)
     saved_images: List[str] = field(default_factory=list)
     semantic_masking_result: Dict[str, Any] = field(
         default_factory=lambda: {"summary": "Semantic masking not executed."}
