@@ -34,4 +34,39 @@ PRESET_DEFAULTS = {
         "mask_image_size": 768,
         "matcher": "sequential",
     },
+    # Aerial/drone footage: wider overlap window, more FPS for fast motion.
+    "drone": {
+        "fps": 5.0,
+        "min_overlap": 0.70,
+        "max_overlap": 0.95,
+        "target_overlap": 0.80,
+        "max_image_dim": 2048,
+        "blur_threshold": 60.0,
+        "mask_image_size": 640,
+        "matcher": "sequential",
+        "sequential_overlap": 16,
+    },
+    # Controlled indoor scenes: tighter blur filter, CLAHE on.
+    "indoor": {
+        "fps": 3.0,
+        "min_overlap": 0.82,
+        "max_overlap": 0.97,
+        "target_overlap": 0.90,
+        "max_image_dim": 1920,
+        "blur_threshold": 110.0,
+        "mask_image_size": 640,
+        "matcher": "sequential",
+    },
+    # Object-centric turntable rig: tight overlap, more angle bins.
+    "turntable": {
+        "fps": 4.0,
+        "min_overlap": 0.88,
+        "max_overlap": 0.98,
+        "target_overlap": 0.93,
+        "max_image_dim": 2048,
+        "blur_threshold": 100.0,
+        "angle_bins": 24,
+        "matcher": "exhaustive",
+        "mask_image_size": 768,
+    },
 }

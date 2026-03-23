@@ -46,6 +46,28 @@ def setup_directories(base_dir: str) -> PipelinePaths:
     return paths
 
 
+def resume_directories(base_dir: str) -> PipelinePaths:
+    """Return the path layout for an existing output folder without wiping anything."""
+
+    paths = PipelinePaths(
+        root=base_dir,
+        images=os.path.join(base_dir, "images"),
+        candidates=os.path.join(base_dir, "_candidates"),
+        masks=os.path.join(base_dir, "masks"),
+        colmap=os.path.join(base_dir, "colmap"),
+        database=os.path.join(base_dir, "colmap", "database.db"),
+        sparse=os.path.join(base_dir, "colmap", "sparse"),
+        dense=os.path.join(base_dir, "colmap", "dense"),
+        undistorted=os.path.join(base_dir, "colmap", "undistorted"),
+        sparse_txt=os.path.join(base_dir, "colmap", "sparse_txt"),
+        report=os.path.join(base_dir, "preprocessing_report.json"),
+    )
+    os.makedirs(paths.images, exist_ok=True)
+    os.makedirs(paths.masks, exist_ok=True)
+    os.makedirs(paths.colmap, exist_ok=True)
+    return paths
+
+
 def cleanup_temporary_candidates(candidates_dir: str) -> None:
     """Remove temporary frame files after the run."""
 

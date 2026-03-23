@@ -17,7 +17,11 @@ class OverlapSelectionStep(PipelineStep):
 
     step_number = 2
     title = "Frame spacing and overlap selection"
-    goal = "Walk through the frames in order and keep the sharpest frame from each useful overlap group."
+    goal = (
+        "Walk the candidate frames in sequence and keep the sharpest one from each visual-overlap group. "
+        "Too much overlap wastes compute; too little breaks reconstruction. "
+        "Missing angle bins are backfilled to keep scene coverage even."
+    )
 
     def __init__(self, config) -> None:
         super().__init__(config)
@@ -306,7 +310,13 @@ class OverlapSelectionStep(PipelineStep):
         )
 
         if not unique_selected:
-            raise RuntimeError("Frame selection failed. No useful frame sequence could be built.")
+            raise RuntimeError(
+                "Frame selection produced no output — the overlap grouping left no frames.\n\n"
+                "Things to try:\n"
+                "  • Lower the minimum overlap so more frames are accepted: --min-overlap 0.70\n"
+                "  • Raise the extraction FPS to give the selector more candidates: --fps 5.0\n"
+                "  • If using an output range, check it is not too tight: --output-image-range 0:0"
+            )
 
         context.selected_frames = unique_selected
         context.overlap_violations = overlap_violations

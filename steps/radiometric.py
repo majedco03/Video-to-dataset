@@ -8,7 +8,7 @@ from typing import List
 import cv2
 import numpy as np
 
-from console import print_info, print_success, print_warning
+from console import create_progress, print_info, print_success, print_warning
 from models import CandidateFrame, PipelineContext
 from .base import PipelineStep
 
@@ -142,14 +142,19 @@ class RadiometricNormalizationStep(PipelineStep):
 
         processed_images: List[np.ndarray] = []
         kept_frames: List[CandidateFrame] = []
-        for item in context.selected_frames:
-            frame = cv2.imread(item.frame_path)
-            if frame is None:
-                print_warning(f"Could not read temporary frame: {item.frame_path}")
-                continue
-            frame = self.resize_image_if_needed(frame, max_dim=self.config.max_image_dim)
-            processed_images.append(self.restore_frame(frame, item.sharpness, median_sharpness))
-            kept_frames.append(item)
+        total = len(context.selected_frames)
+        with create_progress() as progress:
+            task = progress.add_task("[cyan]Restoring frames", total=total)
+            for item in context.selected_frames:
+                frame = cv2.imread(item.frame_path)
+                if frame is None:
+                    print_warning(f"Could not read temporary frame: {item.frame_path}")
+                    progress.advance(task)
+                    continue
+                frame = self.resize_image_if_needed(frame, max_dim=self.config.max_image_dim)
+                processed_images.append(self.restore_frame(frame, item.sharpness, median_sharpness))
+                kept_frames.append(item)
+                progress.advance(task)
 
         if not processed_images:
             raise RuntimeError("No processed images were written.")
@@ -163,11 +168,14 @@ class RadiometricNormalizationStep(PipelineStep):
         reference_std = float(np.std(reference_lightness) + 1e-6)
 
         output_paths: List[str] = []
-        for output_index, image in enumerate(processed_images):
-            corrected = self.normalize_export_image(image, reference_mean, reference_std)
-            out_path = os.path.join(context.paths.images, f"frame_{output_index:05d}.png")
-            cv2.imwrite(out_path, corrected)
-            output_paths.append(out_path)
+        with create_progress() as progress:
+            task = progress.add_task("[cyan]Exporting images", total=len(processed_images))
+            for output_index, image in enumerate(processed_images):
+                corrected = self.normalize_export_image(image, reference_mean, reference_std)
+                out_path = os.path.join(context.paths.images, f"frame_{output_index:05d}.png")
+                cv2.imwrite(out_path, corrected)
+                output_paths.append(out_path)
+                progress.advance(task)
 
         print_success(f"Saved {len(output_paths)} processed images to: {context.paths.images}")
         print_info(f"Frames skipped during save: {len(context.selected_frames) - len(kept_frames)}")

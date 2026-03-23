@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple
 import cv2
 import numpy as np
 
-from console import print_info
+from console import create_progress, print_info
 from constants import EXPOSURE_SCORE_FLOOR, JPEG_QUALITY, OVERLAP_PREVIEW_MAX_DIM
 from models import CandidateFrame, PipelineContext
 from .base import PipelineStep
@@ -18,8 +18,11 @@ class BlurDetectionStep(PipelineStep):
     """Sample the video and keep frames that look usable."""
 
     step_number = 1
-    title = "Frame sampling and quick quality check"
-    goal = "Pull frames from the video and drop the ones that are too blurry or badly exposed."
+    title = "Frame sampling and quality filter"
+    goal = (
+        "Sample one frame every N frames, then score each one for sharpness, texture, and exposure. "
+        "Frames that fall below the thresholds are discarded — fewer frames here means faster COLMAP later."
+    )
 
     @staticmethod
     def compute_sharpness(gray: np.ndarray) -> float:
@@ -65,34 +68,41 @@ class BlurDetectionStep(PipelineStep):
     def sample_candidate_frames(self, candidates_dir: str) -> Tuple[List[CandidateFrame], float, int, int]:
         cap, native_fps, total_frames = self.open_video_capture(self.config.video_path)
         stride = max(1, int(round(native_fps / self.config.extraction_fps)))
+        expected_samples = max(1, total_frames // stride) if total_frames > 0 else None
 
         sampled_candidates: List[CandidateFrame] = []
         frame_idx = 0
 
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-
-            if frame_idx % stride != 0:
-                frame_idx += 1
-                continue
-
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            frame_path = os.path.join(candidates_dir, f"candidate_{frame_idx:07d}.jpg")
-            cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-
-            sampled_candidates.append(
-                CandidateFrame(
-                    frame_idx=frame_idx,
-                    gray_small=self.resize_for_overlap(gray),
-                    frame_path=frame_path,
-                    sharpness=self.compute_sharpness(gray),
-                    texture=self.compute_texture(gray),
-                    exposure_score=self.compute_exposure_score(gray),
-                )
+        with create_progress() as progress:
+            task = progress.add_task(
+                "[cyan]Sampling frames",
+                total=expected_samples,
             )
-            frame_idx += 1
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+
+                if frame_idx % stride != 0:
+                    frame_idx += 1
+                    continue
+
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                frame_path = os.path.join(candidates_dir, f"candidate_{frame_idx:07d}.jpg")
+                cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+
+                sampled_candidates.append(
+                    CandidateFrame(
+                        frame_idx=frame_idx,
+                        gray_small=self.resize_for_overlap(gray),
+                        frame_path=frame_path,
+                        sharpness=self.compute_sharpness(gray),
+                        texture=self.compute_texture(gray),
+                        exposure_score=self.compute_exposure_score(gray),
+                    )
+                )
+                frame_idx += 1
+                progress.advance(task)
 
         cap.release()
         return sampled_candidates, native_fps, stride, total_frames
@@ -176,8 +186,17 @@ class BlurDetectionStep(PipelineStep):
         )
 
         if not candidates:
+            thr = stats.get("sharpness_threshold", self.config.blur_threshold)
+            lower_thr = max(20.0, thr * 0.55)
+            higher_fps = min(30.0, self.config.extraction_fps * 1.5)
             raise RuntimeError(
-                "No clear frames were found. Try lowering the blur threshold or raising the extraction FPS."
+                f"No usable frames survived the quality filter "
+                f"({len(sampled_candidates)} sampled, 0 passed sharpness ≥ {thr:.1f}).\n\n"
+                f"Things to try:\n"
+                f"  • Lower the blur threshold:       --blur-threshold {lower_thr:.0f}\n"
+                f"  • Turn off adaptive tuning:        --no-auto-tune --blur-threshold {self.config.blur_threshold:.0f}\n"
+                f"  • Sample more frames from the video: --fps {higher_fps:.1f}\n"
+                f"  • Make sure the video file is not corrupted and is readable by OpenCV."
             )
 
         context.candidates = candidates

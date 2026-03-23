@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Tuple
 import cv2
 import numpy as np
 
-from console import print_info, print_success, print_warning
+from console import create_progress, print_info, print_success, print_warning, spinner
 from models import PipelineContext
 from .base import PipelineStep
 
@@ -44,7 +44,11 @@ class SemanticMaskingStep(PipelineStep):
 
     step_number = 4
     title = "Semantic masking"
-    goal = "Detect likely moving objects and create masks so COLMAP can ignore them."
+    goal = (
+        "Run instance segmentation to detect moving objects (people, vehicles, animals) "
+        "and paint them out so COLMAP never matches features across them. "
+        "Each mask is saved alongside its image and passed to COLMAP as an ignore region."
+    )
 
     BACKGROUND_LABELS = {"__background__", "background", "n/a", "none"}
 
@@ -465,7 +469,8 @@ class SemanticMaskingStep(PipelineStep):
         self.announce()
         os.makedirs(context.paths.masks, exist_ok=True)
 
-        runtime = self.load_masking_runtime()
+        with spinner(f"Loading {self.config.mask_backend.upper()} model..."):
+            runtime = self.load_masking_runtime()
         requested_device = self.normalize_device_name(self.config.mask_device)
         if requested_device not in {"auto", runtime.device}:
             print_warning(
@@ -484,14 +489,17 @@ class SemanticMaskingStep(PipelineStep):
         )
 
         predictions_by_image: List[Tuple[str, Tuple[int, int], List[DetectedInstance]]] = []
-        for image_path in context.saved_images:
-            image = cv2.imread(image_path)
-            if image is None:
-                print_warning(f"Could not read image for masking: {image_path}")
-                continue
-
-            instances = self.predict_instances(runtime, image, class_id_map)
-            predictions_by_image.append((image_path, image.shape[:2], instances))
+        with create_progress() as progress:
+            task = progress.add_task("[cyan]Running inference", total=len(context.saved_images))
+            for image_path in context.saved_images:
+                image = cv2.imread(image_path)
+                if image is None:
+                    print_warning(f"Could not read image for masking: {image_path}")
+                    progress.advance(task)
+                    continue
+                instances = self.predict_instances(runtime, image, class_id_map)
+                predictions_by_image.append((image_path, image.shape[:2], instances))
+                progress.advance(task)
 
         if not predictions_by_image:
             print_warning("No images were available for semantic masking.")
@@ -518,27 +526,31 @@ class SemanticMaskingStep(PipelineStep):
         used_labels_overall: Dict[str, int] = {}
         previous_focus_bbox: Tuple[float, float, float, float] | None = None
 
-        for image_path, image_shape, instances in predictions_by_image:
-            valid_mask, masked_instances, used_labels, previous_focus_bbox, focus_found = self.build_colmap_ignore_mask(
-                image_shape=image_shape,
-                instances=instances,
-                focus_class_id=focus_class_id,
-                previous_focus_bbox=previous_focus_bbox,
-                keep_focus_subject=not self.config.strict_static_masking,
-            )
+        with create_progress() as progress:
+            task = progress.add_task("[cyan]Writing masks", total=len(predictions_by_image))
+            for image_path, image_shape, instances in predictions_by_image:
+                valid_mask, masked_instances, used_labels, previous_focus_bbox, focus_found = self.build_colmap_ignore_mask(
+                    image_shape=image_shape,
+                    instances=instances,
+                    focus_class_id=focus_class_id,
+                    previous_focus_bbox=previous_focus_bbox,
+                    keep_focus_subject=not self.config.strict_static_masking,
+                )
 
-            mask_path = os.path.join(context.paths.masks, os.path.basename(image_path))
-            cv2.imwrite(mask_path, valid_mask)
-            masks_written += 1
+                mask_path = os.path.join(context.paths.masks, os.path.basename(image_path))
+                cv2.imwrite(mask_path, valid_mask)
+                masks_written += 1
 
-            if focus_found:
-                images_with_focus_subject += 1
+                if focus_found:
+                    images_with_focus_subject += 1
 
-            if masked_instances > 0:
-                images_with_masked_objects += 1
-                masked_instances_total += masked_instances
-                for label in used_labels:
-                    used_labels_overall[label] = used_labels_overall.get(label, 0) + 1
+                if masked_instances > 0:
+                    images_with_masked_objects += 1
+                    masked_instances_total += masked_instances
+                    for label in used_labels:
+                        used_labels_overall[label] = used_labels_overall.get(label, 0) + 1
+
+                progress.advance(task)
 
         print_success(f"Saved {masks_written} semantic mask images to: {context.paths.masks}")
         print_info(

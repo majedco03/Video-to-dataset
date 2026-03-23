@@ -7,7 +7,7 @@ import re
 import subprocess
 from typing import Dict, List, Tuple
 
-from console import print_info, print_success, print_warning
+from console import print_info, print_success, print_warning, spinner
 from constants import COLMAP_MAX_IMAGE_SIZE
 from filesystem import safe_remove
 from models import PipelineContext
@@ -19,7 +19,11 @@ class StructureFromMotionStep(PipelineStep):
 
     step_number = 5
     title = "COLMAP structure-from-motion"
-    goal = "Build a sparse camera reconstruction and export a clean undistorted dataset."
+    goal = (
+        "Run COLMAP feature extraction, feature matching, and sparse mapping to triangulate "
+        "3D points and recover the camera pose for every selected frame. "
+        "The best sparse model is then undistorted and exported."
+    )
 
     @staticmethod
     def parse_analyzer_value(summary: str, label: str) -> float:
@@ -70,8 +74,11 @@ class StructureFromMotionStep(PipelineStep):
 
     @staticmethod
     def run_command(command: List[str], label: str) -> None:
-        print_info(f"Running {label}...")
-        subprocess.run(command, check=True)
+        with spinner(f"{label}..."):
+            result = subprocess.run(command, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            stderr_tail = "\n".join((result.stderr or "").splitlines()[-10:]).strip()
+            raise subprocess.CalledProcessError(result.returncode, command, stderr=stderr_tail)
         print_success(f"Finished {label}.")
 
     def get_colmap_thread_count(self) -> int:
@@ -238,6 +245,16 @@ class StructureFromMotionStep(PipelineStep):
             print_success(f"COLMAP sparse reconstruction completed in: {context.paths.colmap}")
             best_model_dir, best_summary, best_metrics = self.select_best_sparse_model(context.paths.sparse)
             if not best_model_dir:
+                print_warning(
+                    "COLMAP mapper ran but produced no reconstruction.\n"
+                    "  This usually means there was not enough frame overlap for feature matching.\n\n"
+                    "  Things to try:\n"
+                    "    • Increase frame sampling:              --fps 5.0\n"
+                    "    • Lower the minimum overlap threshold:  --min-overlap 0.70\n"
+                    "    • Switch to exhaustive matcher:         --matcher exhaustive\n"
+                    "    • Reduce image size for faster matching: --max-image-dim 1280\n"
+                    "  The cleaned image dataset is still ready to use without reconstruction."
+                )
                 context.colmap_result = {
                     "summary": "No sparse model folder found in colmap/sparse",
                     "best_model_dir": "",
@@ -265,8 +282,16 @@ class StructureFromMotionStep(PipelineStep):
             }
         except (subprocess.CalledProcessError, FileNotFoundError) as error:
             print_warning("COLMAP failed or is not installed.")
-            print_warning(f"Reason: {error}")
-            print_info("The processed image dataset is still ready to use.")
+            stderr = getattr(error, "stderr", "") or ""
+            if stderr:
+                print_info(f"COLMAP output (last lines):\n{stderr}")
+            print_info(
+                "Things to try:\n"
+                "  • Run 'python preprocess.py doctor' to check COLMAP is installed and on PATH.\n"
+                "  • Try a CPU-only run:          --colmap-device cpu\n"
+                "  • Skip reconstruction for now: --no-colmap\n"
+                "  The cleaned image dataset is still saved and ready to use."
+            )
             context.colmap_result = {
                 "summary": f"COLMAP failed: {error}",
                 "device": self.config.colmap_device,

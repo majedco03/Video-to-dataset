@@ -81,6 +81,8 @@ class PipelineConfig:
     output_max_images: int
     quality_gate_min_overlap: float
     quality_gate_fail: bool
+    export_format: str = "colmap"
+    resume: bool = True
     preset: str = "balanced"
 
 
@@ -89,6 +91,7 @@ class PipelineContext:
     """Shared data passed from one step to the next."""
 
     paths: PipelinePaths | None = None
+    resuming: bool = False
     candidates: List[CandidateFrame] = field(default_factory=list)
     native_fps: float = 0.0
     stride: int = 0

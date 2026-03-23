@@ -3,4 +3,6 @@ opencv-python
 torch
 torchvision
 ultralytics
+questionary>=2.0
+rich>=13.0
 pytest

@@ -82,3 +82,15 @@ def save_pipeline_profile(name: str, options: Dict[str, Any]) -> None:
         "options": options,
     }
     save_profile_store(store)
+
+
+def delete_pipeline_profile(name: str) -> bool:
+    """Delete a saved profile by name. Returns True when found and deleted."""
+
+    store = load_profile_store()
+    profiles = store.get("profiles", {})
+    if name not in profiles:
+        return False
+    del profiles[name]
+    save_profile_store(store)
+    return True

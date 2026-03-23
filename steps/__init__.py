@@ -2,6 +2,7 @@
 
 from .base import PipelineStep
 from .blur import BlurDetectionStep
+from .export import ExportFormatsStep
 from .finalize import FinalizationStep
 from .masking import SemanticMaskingStep
 from .radiometric import RadiometricNormalizationStep
@@ -17,5 +18,6 @@ __all__ = [
     "RadiometricNormalizationStep",
     "SemanticMaskingStep",
     "StructureFromMotionStep",
+    "ExportFormatsStep",
     "FinalizationStep",
 ]

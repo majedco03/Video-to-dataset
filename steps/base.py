@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from console import print_section
+from console import print_info, print_section
 from models import PipelineConfig, PipelineContext
 
 
@@ -15,6 +15,11 @@ class PipelineStep:
 
     def __init__(self, config: PipelineConfig) -> None:
         self.config = config
+
+    @property
+    def step_name(self) -> str:
+        """Stable identifier used for checkpoint tracking."""
+        return self.__class__.__name__
 
     def announce(self) -> None:
         if self.step_number is None:
