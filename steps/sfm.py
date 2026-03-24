@@ -48,10 +48,12 @@ class StructureFromMotionStep(PipelineStep):
 
             analyzer = subprocess.run(
                 ["colmap", "model_analyzer", "--path", model_dir],
-                check=True,
+                check=False,
                 capture_output=True,
                 text=True,
             )
+            if analyzer.returncode != 0:
+                continue  # empty or corrupt sub-model; skip without aborting
             summary = (analyzer.stdout or "") + ("\n" if analyzer.stdout and analyzer.stderr else "") + (analyzer.stderr or "")
             images = self.parse_analyzer_value(summary, "Registered images")
             points = self.parse_analyzer_value(summary, "Points")
@@ -95,51 +97,45 @@ class StructureFromMotionStep(PipelineStep):
         return maybe_index or "0"
 
     def build_feature_command(self, images_dir: str, database_path: str, mask_path: str = "") -> List[str]:
-        use_gpu_flag = "1" if self.config.use_gpu else "0"
         num_threads = str(self.get_colmap_thread_count())
+        # COLMAP 3.13+: thread count and GPU control moved to FeatureExtraction.* namespace.
         command = [
             "colmap", "feature_extractor",
             "--database_path", database_path,
             "--image_path", images_dir,
             "--ImageReader.camera_model", "SIMPLE_RADIAL",
             "--ImageReader.single_camera", "1",
-            "--SiftExtraction.use_gpu", use_gpu_flag,
-            "--SiftExtraction.num_threads", num_threads,
+            "--FeatureExtraction.num_threads", num_threads,
             "--SiftExtraction.max_num_features", "16384",
-            "--SiftExtraction.estimate_affine_shape", "1",
-            "--SiftExtraction.domain_size_pooling", "1",
         ]
         if self.config.use_gpu:
-            command.extend(["--SiftExtraction.gpu_index", self.get_colmap_gpu_index()])
+            # GPU-only flags: only present in CUDA-enabled COLMAP builds.
+            command.extend([
+                "--FeatureExtraction.gpu_index", self.get_colmap_gpu_index(),
+                "--SiftExtraction.estimate_affine_shape", "1",
+                "--SiftExtraction.domain_size_pooling", "1",
+            ])
         if mask_path:
             command.extend(["--ImageReader.mask_path", mask_path])
         return command
 
     def build_match_command(self, database_path: str, matcher: str | None = None) -> List[str]:
-        use_gpu_flag = "1" if self.config.use_gpu else "0"
         num_threads = str(self.get_colmap_thread_count())
-        cpu_matcher_args: List[str] = []
-        if not self.config.use_gpu:
-            cpu_matcher_args = [
-                "--SiftMatching.cpu_brute_force_matcher", "1",
-                "--SiftMatching.num_threads", num_threads,
-            ]
-        else:
-            cpu_matcher_args = [
-                "--SiftMatching.gpu_index", self.get_colmap_gpu_index(),
-                "--SiftMatching.num_threads", num_threads,
-            ]
+        # COLMAP 3.13+: thread count, GPU control, and guided_matching moved to FeatureMatching.* namespace.
+        shared_match_args = ["--FeatureMatching.num_threads", num_threads]
+        if self.config.use_gpu:
+            # GPU-only flag: only present in CUDA-enabled COLMAP builds.
+            shared_match_args = ["--FeatureMatching.gpu_index", self.get_colmap_gpu_index()] + shared_match_args
 
         selected_matcher = matcher or self.config.matcher
         if selected_matcher == "sequential":
             command = [
                 "colmap", "sequential_matcher",
                 "--database_path", database_path,
-                "--SiftMatching.use_gpu", use_gpu_flag,
-                "--SiftMatching.guided_matching", "1",
+                "--FeatureMatching.guided_matching", "1",
                 "--SequentialMatching.overlap", str(self.config.sequential_overlap),
                 "--SequentialMatching.quadratic_overlap", "1",
-                *cpu_matcher_args,
+                *shared_match_args,
             ]
             if self.config.loop_detection and self.config.vocab_tree_path:
                 command.extend([
@@ -151,9 +147,8 @@ class StructureFromMotionStep(PipelineStep):
         return [
             "colmap", "exhaustive_matcher",
             "--database_path", database_path,
-            "--SiftMatching.use_gpu", use_gpu_flag,
-            "--SiftMatching.guided_matching", "1",
-            *cpu_matcher_args,
+            "--FeatureMatching.guided_matching", "1",
+            *shared_match_args,
         ]
 
     def build_mapper_command(self, images_dir: str, database_path: str, sparse_dir: str) -> List[str]:

@@ -537,7 +537,9 @@ class SemanticMaskingStep(PipelineStep):
                     keep_focus_subject=not self.config.strict_static_masking,
                 )
 
-                mask_path = os.path.join(context.paths.masks, os.path.basename(image_path))
+                # COLMAP mask naming convention: <image_filename>.png (extension appended, not replaced).
+                mask_filename = os.path.basename(image_path) + ".png"
+                mask_path = os.path.join(context.paths.masks, mask_filename)
                 cv2.imwrite(mask_path, valid_mask)
                 masks_written += 1
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import copy
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import sys
 from typing import Callable
 
@@ -119,6 +121,24 @@ def apply_profile_to_args(
         parser.error(f"Saved profile was not found: {profile_name}")
 
     defaults = get_run_parser_defaults(parser)
+
+    # Auto-migrate: add new fields present in the current parser but absent from the saved profile.
+    _MIGRATION_EXCLUDED = PROFILE_EXCLUDED_FIELDS | {"videos", "dir", "dry_run"}
+    new_fields = {
+        key: value
+        for key, value in defaults.items()
+        if key not in profile_options
+        and key not in _MIGRATION_EXCLUDED
+        and value is not None
+    }
+    if new_fields:
+        profile_options = {**profile_options, **new_fields}
+        save_pipeline_profile(profile_name, profile_options)
+        print_info(
+            f"Profile '[bold]{profile_name}[/bold]' was automatically updated with "
+            f"{len(new_fields)} new setting(s): {', '.join(sorted(new_fields))}"
+        )
+
     for field_name, saved_value in profile_options.items():
         if field_name in PROFILE_EXCLUDED_FIELDS or not hasattr(args, field_name):
             continue
@@ -1454,9 +1474,23 @@ def run_doctor() -> int:
         cv_ok = _check("OpenCV", False, "", "pip install opencv-python")
     all_ok = all_ok and cv_ok
 
-    # COLMAP
-    colmap_ok = bool(shutil.which("colmap"))
-    _check("COLMAP", colmap_ok, "Found in PATH", "Not found — install COLMAP and add to PATH", required=True)
+    # COLMAP — check presence and get version
+    colmap_path = shutil.which("colmap")
+    colmap_ok = bool(colmap_path)
+    colmap_version = ""
+    if colmap_ok:
+        try:
+            ver_result = subprocess.run(
+                ["colmap", "--version"],
+                check=False, capture_output=True, text=True,
+            )
+            raw = (ver_result.stdout or ver_result.stderr or "").strip()
+            # COLMAP prints e.g. "COLMAP 3.9.1 (Commit ...)" — grab the number
+            ver_match = re.search(r"\b(\d+\.\d+[\.\d]*)\b", raw)
+            colmap_version = ver_match.group(1) if ver_match else raw[:20]
+        except Exception:
+            pass
+    _check("COLMAP", colmap_ok, "Found in PATH", "Not found — install COLMAP and add to PATH", colmap_version, required=True)
     all_ok = all_ok and colmap_ok
 
     # Ultralytics (YOLO)
