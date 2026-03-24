@@ -1,0 +1,70 @@
+# Virtual environment
+.venv
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Build / packaging
+*.egg-info
+dist
+build
+*.egg
+
+# Native extensions
+*.so
+*.dll
+*.dylib
+
+# IDE / OS
+.DS_Store
+.vscode
+.idea
+
+# Test cache / coverage (keep tests/ source committed)
+.pytest_cache
+.mypy_cache
+.coverage
+.coverage.*
+htmlcov
+.tox
+.nox
+.pyre
+.pytype
+.cache
+
+# Notebook checkpoints
+.ipynb_checkpoints
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+*.swp
+
+# Video / media input files
+*.mp4
+*.MP4
+*.avi
+*.AVI
+*.mov
+*.MOV
+*.mkv
+*.MKV
+*.zip
+
+# Model weights
+yolov8n-seg.pt
+yolov8n.pt
+*.pt
+
+# Pipeline output folders
+processed_dataset/
+processed_data/
+processed_dataset_colmap_best/
+
+# Generated output files (contain personal paths / runtime data)
+preprocessing_report.json
+*.json
