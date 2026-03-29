@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from console import create_progress, print_info, print_success, print_warning, spinner
+from constants import MASK_DYNAMIC_GRID_SIZE, MASK_DYNAMIC_MIN_PRESENCE
 from models import PipelineContext
 from .base import PipelineStep
 
@@ -364,6 +365,81 @@ class SemanticMaskingStep(PipelineStep):
         next_focus_bbox = focus_instance.bbox if focus_instance is not None else previous_focus_bbox
         return valid_mask, masked_instances, used_labels, next_focus_bbox, focus_instance is not None
 
+    @classmethod
+    def build_static_position_map(
+        cls,
+        predictions_by_image: List[Tuple[str, Tuple[int, int], List[DetectedInstance]]],
+        grid_size: int = MASK_DYNAMIC_GRID_SIZE,
+        min_presence_ratio: float = MASK_DYNAMIC_MIN_PRESENCE,
+    ) -> set:
+        """Find (class_id, grid_x, grid_y) cells where objects appear consistently across frames.
+
+        A cell that contains an instance of the same class in many frames is
+        considered a static position — the object there is not moving.
+        """
+        total_frames = len(predictions_by_image)
+        if total_frames < 3:
+            return set()
+
+        cell_frames: Dict[Tuple[int, int, int], set] = {}
+
+        for frame_idx, (_, shape, instances) in enumerate(predictions_by_image):
+            h, w = shape
+            for inst in instances:
+                cx = (inst.bbox[0] + inst.bbox[2]) / 2.0 / max(w, 1)
+                cy = (inst.bbox[1] + inst.bbox[3]) / 2.0 / max(h, 1)
+                gx = min(int(cx * grid_size), grid_size - 1)
+                gy = min(int(cy * grid_size), grid_size - 1)
+                key = (inst.class_id, gx, gy)
+                cell_frames.setdefault(key, set()).add(frame_idx)
+
+        min_frames = max(2, int(total_frames * min_presence_ratio))
+        return {key for key, frames in cell_frames.items() if len(frames) >= min_frames}
+
+    @classmethod
+    def is_instance_static(
+        cls,
+        instance: DetectedInstance,
+        image_shape: Tuple[int, int],
+        static_cells: set,
+        grid_size: int = MASK_DYNAMIC_GRID_SIZE,
+    ) -> bool:
+        """Check whether an instance falls inside a grid cell marked as static."""
+        h, w = image_shape
+        cx = (instance.bbox[0] + instance.bbox[2]) / 2.0 / max(w, 1)
+        cy = (instance.bbox[1] + instance.bbox[3]) / 2.0 / max(h, 1)
+        gx = min(int(cx * grid_size), grid_size - 1)
+        gy = min(int(cy * grid_size), grid_size - 1)
+        return (instance.class_id, gx, gy) in static_cells
+
+    @classmethod
+    def filter_dynamic_instances(
+        cls,
+        predictions_by_image: List[Tuple[str, Tuple[int, int], List[DetectedInstance]]],
+    ) -> Tuple[List[Tuple[str, Tuple[int, int], List[DetectedInstance]]], int, int]:
+        """Remove instances that sit in static grid cells.
+
+        Returns the filtered predictions list, the count of static instances
+        removed, and the count of unique static positions detected.
+        """
+        static_cells = cls.build_static_position_map(predictions_by_image)
+        if not static_cells:
+            return predictions_by_image, 0, 0
+
+        filtered: List[Tuple[str, Tuple[int, int], List[DetectedInstance]]] = []
+        removed_count = 0
+
+        for path, shape, instances in predictions_by_image:
+            dynamic = []
+            for inst in instances:
+                if cls.is_instance_static(inst, shape, static_cells):
+                    removed_count += 1
+                else:
+                    dynamic.append(inst)
+            filtered.append((path, shape, dynamic))
+
+        return filtered, removed_count, len(static_cells)
+
     def load_yolo_runtime(self, device: str) -> MaskingRuntime:
         try:
             from ultralytics import YOLO
@@ -511,6 +587,18 @@ class SemanticMaskingStep(PipelineStep):
             }
             return context
 
+        static_removed = 0
+        static_positions = 0
+        if self.config.mask_dynamic_only:
+            predictions_by_image, static_removed, static_positions = self.filter_dynamic_instances(predictions_by_image)
+            if static_positions:
+                print_info(
+                    f"Motion-aware masking: {static_positions} static position(s) detected, "
+                    f"{static_removed} static instance(s) excluded from masks"
+                )
+            else:
+                print_info("Motion-aware masking: no consistently static objects detected")
+
         focus_class_id, focus_label = self.choose_focus_class([instances for _, _, instances in predictions_by_image])
         if focus_label is not None and not self.config.strict_static_masking:
             print_info(f"Focused subject class kept unmasked: {focus_label}")
@@ -559,7 +647,7 @@ class SemanticMaskingStep(PipelineStep):
             f"Images with masked objects: {images_with_masked_objects} | masked instances: {masked_instances_total}"
         )
 
-        context.semantic_masking_result = {
+        result = {
             "summary": "Semantic masking completed.",
             "backend": runtime.backend,
             "model": runtime.model_name,
@@ -575,4 +663,9 @@ class SemanticMaskingStep(PipelineStep):
             "class_usage": used_labels_overall,
             "mask_dir": context.paths.masks,
         }
+        if self.config.mask_dynamic_only:
+            result["mask_dynamic_only"] = True
+            result["static_positions_detected"] = static_positions
+            result["static_instances_excluded"] = static_removed
+        context.semantic_masking_result = result
         return context

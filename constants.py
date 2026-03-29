@@ -19,6 +19,9 @@ DEFAULT_OUTPUT_MIN_IMAGES = 0
 DEFAULT_OUTPUT_MAX_IMAGES = 0
 DEFAULT_QUALITY_GATE_MIN_OVERLAP = 0.0
 DEFAULT_QUALITY_GATE_FAIL = False
+DEFAULT_MASK_DYNAMIC_ONLY = False
+MASK_DYNAMIC_GRID_SIZE = 20
+MASK_DYNAMIC_MIN_PRESENCE = 0.4
 
 PRESET_DEFAULTS = {
     "balanced": {},
@@ -56,6 +59,21 @@ PRESET_DEFAULTS = {
         "blur_threshold": 110.0,
         "mask_image_size": 640,
         "matcher": "sequential",
+    },
+    # COLMAP → 3DGS reconstruction: strict blur, Mask R-CNN, focus-subject kept.
+    "colmap-3dgs": {
+        "fps": 5.0,
+        "blur_threshold": 70.0,
+        "min_overlap": 0.65,
+        "max_overlap": 0.95,
+        "target_overlap": 0.78,
+        "max_image_dim": 2048,
+        "mask_backend": "rcnn",
+        "mask_image_size": 768,
+        "mask_confidence": 0.40,
+        "matcher": "sequential",
+        "sequential_overlap": 16,
+        "quality_gate_min_overlap": 0.50,
     },
     # Object-centric turntable rig: tight overlap, more angle bins.
     "turntable": {

@@ -19,6 +19,7 @@ from constants import (
     DEFAULT_MASK_BACKEND,
     DEFAULT_MASK_CLASSES,
     DEFAULT_MASK_CONFIDENCE,
+    DEFAULT_MASK_DYNAMIC_ONLY,
     DEFAULT_MASK_IMAGE_SIZE,
     DEFAULT_MASK_MODEL,
     DEFAULT_OUTPUT_MAX_IMAGES,
@@ -463,6 +464,14 @@ def _run_wizard_prompts(values: dict) -> dict:
             [0.25, 0.35, 0.5, 0.7],
             float,
         )
+        values["strict_static_masking"] = prompt_bool(
+            "Strict masking (mask all detected classes, no focus subject)?",
+            default=bool(values.get("strict_static_masking", False)),
+        )
+        values["mask_dynamic_only"] = prompt_bool(
+            "Motion-aware masking (only mask moving objects, keep static ones)?",
+            default=bool(values.get("mask_dynamic_only", False)),
+        )
 
     console.print()
     console.print(Panel.fit(
@@ -574,6 +583,7 @@ def run_setup_wizard() -> int:
                 ("balanced - safe default for most cases", "balanced"),
                 ("laptop-fast - lighter settings for easier runs", "laptop-fast"),
                 ("quality - stronger settings when quality matters more", "quality"),
+                ("colmap-3dgs - COLMAP to 3DGS with Mask R-CNN and motion-aware masking", "colmap-3dgs"),
             ],
             default_index=0,
         )
@@ -784,6 +794,7 @@ def show_effective_settings(args: argparse.Namespace) -> None:
         table.add_row("  Image size", str(config.mask_image_size))
         table.add_row("  Confidence", str(config.mask_confidence))
         table.add_row("  Strict masking", on_off(config.strict_static_masking))
+        table.add_row("  Dynamic only", on_off(config.mask_dynamic_only))
     table.add_row("Angle coverage", f"{on_off(config.validate_angle_coverage)} ({config.angle_bins} bins)")
     table.add_row("Output range", f"{config.output_min_images} → {max_images}")
     table.add_row("Run COLMAP", yes_no(config.run_sfm))
@@ -1089,6 +1100,15 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_STRICT_STATIC_MASKING,
         help="Mask all detected selected classes without keeping a focused subject instance.",
     )
+    masking_group.add_argument(
+        "--mask-dynamic-only",
+        action="store_true",
+        default=DEFAULT_MASK_DYNAMIC_ONLY,
+        help=(
+            "Only mask objects that move between frames. Static objects (e.g. parked "
+            "vehicles) are detected via spatial consistency and excluded from masks."
+        ),
+    )
 
     colmap_group = parser.add_argument_group(
         "COLMAP",
@@ -1252,8 +1272,54 @@ def show_shell_help() -> None:
     console.print(Panel(table, title="[bold]Shell Commands[/bold]", border_style="cyan"))
 
 
+def _setup_shell_readline() -> str:
+    """Enable readline for the interactive shell and return the history file path.
+
+    After this call, ``input()`` supports:
+    - Up / Down arrows to cycle through command history
+    - Left / Right arrows to move the cursor inside the line
+    - Home / End to jump to the start or end of the line
+    - Tab completion (no-op completer, but prevents tab from inserting literals)
+
+    History is persisted to ``~/.video_to_dataset/shell_history`` so commands
+    survive across sessions.
+    """
+    import atexit
+    import readline
+
+    history_dir = os.path.join(os.path.expanduser("~"), ".video_to_dataset")
+    os.makedirs(history_dir, exist_ok=True)
+    history_file = os.path.join(history_dir, "shell_history")
+
+    # libedit (macOS default) needs a different config syntax than GNU readline.
+    if "libedit" in (readline.__doc__ or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+        readline.parse_and_bind("bind ^[[A ed-prev-history")
+        readline.parse_and_bind("bind ^[[B ed-next-history")
+        readline.parse_and_bind("bind ^[[C ed-next-char")
+        readline.parse_and_bind("bind ^[[D ed-prev-char")
+    else:
+        readline.parse_and_bind("tab: complete")
+        readline.parse_and_bind('"\e[A": previous-history')
+        readline.parse_and_bind('"\e[B": next-history')
+        readline.parse_and_bind('"\e[C": forward-char')
+        readline.parse_and_bind('"\e[D": backward-char')
+
+    readline.set_history_length(500)
+
+    try:
+        readline.read_history_file(history_file)
+    except FileNotFoundError:
+        pass
+
+    atexit.register(readline.write_history_file, history_file)
+    return history_file
+
+
 def run_interactive_shell(execute_run_command: Callable[[argparse.Namespace], None]) -> int:
     """Keep the framework open so the user can run many commands in one session."""
+
+    _setup_shell_readline()
 
     console.print()
     console.print(Panel.fit(
@@ -1313,6 +1379,7 @@ def show_presets() -> None:
         "balanced": "Safe default for most capture scenarios",
         "laptop-fast": "Lighter settings for quick runs on a laptop",
         "quality": "Higher-quality settings when detail matters most",
+        "colmap-3dgs": "COLMAP \u2192 3DGS reconstruction with Mask R-CNN and motion-aware masking",
         "drone": "Optimised for aerial/drone footage with wide-angle motion",
         "indoor": "Tighter blur filter and CLAHE for controlled indoor scenes",
         "turntable": "Object-centric capture with tight overlap for turntable rigs",
@@ -1691,6 +1758,7 @@ def build_config_from_args(args: argparse.Namespace, video_path: str | None = No
         mask_device=args.mask_device,
         mask_image_size=args.mask_image_size,
         mask_confidence=args.mask_confidence,
+        mask_dynamic_only=args.mask_dynamic_only,
         colmap_device=resolved_colmap_device,
         colmap_parallel=colmap_parallel,
         colmap_num_threads=args.colmap_threads,

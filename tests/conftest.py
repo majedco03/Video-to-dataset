@@ -36,6 +36,7 @@ def config_factory():
             "mask_device": "cpu",
             "mask_image_size": 640,
             "mask_confidence": 0.35,
+            "mask_dynamic_only": False,
             "colmap_device": "cpu",
             "colmap_parallel": False,
             "colmap_num_threads": 1,

@@ -66,6 +66,7 @@ class PipelineConfig:
     mask_device: str
     mask_image_size: int
     mask_confidence: float
+    mask_dynamic_only: bool
     colmap_device: str
     colmap_parallel: bool
     colmap_num_threads: int
